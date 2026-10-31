@@ -6,6 +6,14 @@
 
 当前版本：**v0.1.3**
 
+## 界面预览
+
+![主界面](docs/screenshot-main.png)
+
+| 右键菜单 | 设置菜单 |
+| --- | --- |
+| ![右键菜单](docs/screenshot-menu.png) | ![设置菜单](docs/screenshot-settings.png) |
+
 ## v0.1.3 修复内容
 
 ### 1. 部分程序图标在收纳盒里只有「小米粒」大（已修复）
