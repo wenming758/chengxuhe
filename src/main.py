@@ -314,7 +314,7 @@ class Launcher(object):
                 pass
 
     def _on_reshow(self, _=None):
-        """窗口重新显示：合并同一时刻的多次请求，再强制重绘一次。"""
+        """窗口重新显示：合并同一时刻的多次请求，再补一串全窗重绘。"""
         if getattr(self, "_reshow_pending", False):
             return
         self._reshow_pending = True
@@ -323,12 +323,41 @@ class Launcher(object):
             self._reshow_pending = False
             if getattr(self, "_closing", False):
                 return
-            self._force_repaint()
+            self._reshow_repaint()
 
         try:
             self.root.after(30, go)
         except Exception:
             self._reshow_pending = False
+
+    RESHOW_SHOTS = (30, 120, 320, 700, 1400, 2400)
+
+    def _reshow_repaint(self):
+        """窗口刚重新显示：连着补几次全窗重绘，且不受节流影响。
+
+        恢复后头一两次补画经常正好踩在系统还没把客户区交回来的点上，
+        画了等于没画；只补一次的话侧栏和卡片区会一直停在黑底，
+        直到鼠标划过才一个个补出来。
+        """
+        self._reshow_seq = getattr(self, "_reshow_seq", 0) + 1
+        seq = self._reshow_seq
+        for ms in self.RESHOW_SHOTS:
+            try:
+                self.root.after(ms, lambda s=seq: self._reshow_shot(s))
+            except Exception:
+                pass
+
+    def _reshow_shot(self, seq):
+        if seq != getattr(self, "_reshow_seq", 0):
+            return
+        if getattr(self, "_closing", False):
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
+            return
+        self._force_repaint(force=True)
 
     def _first_fill(self):
         """骨架显示之后再填卡片（分帧，首屏不会空白太久）。"""
@@ -434,7 +463,7 @@ class Launcher(object):
         except Exception:
             pass
 
-    def _force_repaint(self, pump=False):
+    def _force_repaint(self, pump=False, force=False):
         """强制整窗重绘一次。
 
         Windows 上偶发「窗口一片黑，鼠标扫到哪里才出现哪里」——
@@ -447,7 +476,7 @@ class Launcher(object):
         """
         if getattr(self, "_repaint_busy", False):
             return
-        if not pump:
+        if not pump and not force:
             now = time.time()
             # 最大化 / 拖边缘时窗口还没稳定，此刻同步重绘会把消息循环卡住；
             # 等尺寸停下来 0.25 秒后再补一次。
@@ -460,6 +489,14 @@ class Launcher(object):
                         self._repaint_deferred = False
                 return
             if now - getattr(self, "_repaint_at", 0.0) < 0.2:
+                # 被节流挡掉的这一次不能直接丢掉：排一次补画，否则「刚好
+                # 卡在两次重绘之间」的那次请求就永远没人处理了。
+                if not self._repaint_deferred:
+                    self._repaint_deferred = True
+                    try:
+                        self.root.after(260, self._repaint_later)
+                    except Exception:
+                        self._repaint_deferred = False
                 return
             self._repaint_at = now
         self._repaint_busy = True
@@ -1974,11 +2011,11 @@ class Launcher(object):
             self._dnd.poll()
         except Exception:
             pass
-        # 窗口被重新显示（最小化再恢复 / 切回前台）：补一次全窗重绘。
+        # 窗口被重新显示（最小化再恢复 / 切回前台）：补一串全窗重绘。
         # 不补的话整块客户区会停在黑底，只有鼠标划过的控件才会补画。
         if getattr(self._dnd, "needs_repaint", False):
             self._dnd.needs_repaint = False
-            self._force_repaint()
+            self._reshow_repaint()
         # 窗口过程没触发时，直接去系统取「拖拽进来的文件列表」兜底
         try:
             if not self._dnd.pending:
