@@ -22,6 +22,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import assets as A          # noqa: E402
+import blessings as B       # noqa: E402
 import delta                # noqa: E402
 import iconutil             # noqa: E402
 import linkfix              # noqa: E402
@@ -348,6 +349,10 @@ class Launcher(object):
             self.root.after(4000, self._auto_check_update)
         except Exception:
             pass
+        try:
+            self.root.after(B.INTERVAL_MS, self._rotate_blessing)
+        except Exception:
+            pass
 
     def _auto_check_update(self):
         """启动后后台静默检查更新，有新版才弹提示。"""
@@ -556,7 +561,10 @@ class Launcher(object):
                bordercolor=[("focus", T.ACCENT)])
 
     # ================================================== 界面骨架
+    BLESS_LEFT = 340          # 顶栏标题区占到这个位置，祝福语从它后面开始
+
     def _build_ui(self):
+        self._bless = B.pick()
         self.header = tk.Frame(self.root, height=88, bg=T.BG_HEAD_B)
         self.header.pack(fill="x", side="top")
         self.header.pack_propagate(False)
@@ -613,6 +621,55 @@ class Launcher(object):
         c.create_text(92, 57, text="单击启动 · 拖进来就能收藏 · 右键管理",
                       anchor="w", font=self.F["logo_sub"], fill="#FFF3E2")
         self._place_header_widgets(w)
+        self._draw_blessing(w, h)
+
+    def _draw_blessing(self, w, h):
+        """顶栏中间的祝福语：每 5 分钟换一条，窗口太窄放不下就干脆不画。"""
+        c = self.head_cv
+        c.delete("bless")
+        item = getattr(self, "_bless", None)
+        if not item:
+            return
+        left = self.BLESS_LEFT
+        right = getattr(self, "_search_x", w) - 14
+        if right - left < 250:
+            return
+        font = self.F["small_b"]
+        img = self.bank.get(item[0], 18)
+        icon_w = 22 if img is not None else 0
+        text = T.ellipsis(item[1], font, right - left - 28 - icon_w)
+
+        tid = c.create_text(0, 0, text=text, anchor="w", font=font,
+                            fill="#FFFFFF")
+        bb = c.bbox(tid)
+        c.delete(tid)
+        if not bb:
+            return
+        gw = icon_w + 6 + (bb[2] - bb[0])
+        x0 = left + max(0, (right - left - gw) // 2)
+        cy = h // 2
+        T.pill(c, x0 - 14, cy - 17, x0 + gw + 14, cy + 17,
+               fill=T.lighten(self._head_bg_at(x0 + gw / 2.0, w), 0.26),
+               tags="bless")
+        if img is not None:
+            c.create_image(x0 + 11, cy, image=img, tags="bless")
+        c.create_text(x0 + icon_w + 6, cy, text=text, anchor="w", font=font,
+                      fill="#FFFFFF", tags="bless")
+
+    def _rotate_blessing(self):
+        """换一条祝福语；顶栏可能还没画出来，尺寸留着下次重绘时用。"""
+        try:
+            self._bless = B.pick(getattr(self, "_bless", (None, ""))[1])
+            w = self.head_cv.winfo_width()
+            h = self.head_cv.winfo_height()
+            if w > 1 and h > 1:
+                self._draw_blessing(w, h)      # 窗口没显示时，下次顶栏重绘自然带上
+        except Exception:
+            pass
+        try:
+            self.root.after(B.INTERVAL_MS, self._rotate_blessing)
+        except Exception:
+            pass
 
     def _head_bg_at(self, x, w):
         t = max(0.0, min(1.0, x / float(max(1, w))))
