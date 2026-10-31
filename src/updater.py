@@ -210,7 +210,15 @@ def make_updater_script(target_exe, new_exe):
         'newFile = %s\r\n' % vb(new_exe) +
         'tgt = %s\r\n' % vb(target_exe) +
         'exeName = LCase(fso.GetFileName(tgt))\r\n'
-        'tgtL = LCase(tgt)\r\n'
+        # WMI 的 ExecutablePath 会把用户名之类压成 8.3 短名（C:\Users\ADMINI~1\...），
+        # 整串比对经常对不上，所以只比「最后一级目录 + 文件名」这个后缀。
+        # 万一误判成还在跑，最多是白等 10 秒，不会开不起来。
+        'pdir = fso.GetParentFolderName(tgt)\r\n'
+        'Do While Right(pdir, 1) = "\\" Or Right(pdir, 1) = "/"\r\n'
+        '  pdir = Left(pdir, Len(pdir) - 1)\r\n'
+        'Loop\r\n'
+        'tailKey = LCase(fso.GetFileName(pdir) & "\\" & fso.GetFileName(tgt))\r\n'
+        'tailLen = Len(tailKey)\r\n'
         'ok = False\r\n'
         'For i = 1 To 120\r\n'
         '  On Error Resume Next\r\n'
@@ -236,23 +244,35 @@ def make_updater_script(target_exe, new_exe):
         '  lg.Close\r\n'
         '  On Error GoTo 0\r\n'
         'End If\r\n'
-        # 轮询进程表：同名且路径一致的那个进程还在，就继续等（最多 10 秒）。
-        # 用 Win32_Process 全量取回再在脚本里比对，避免把路径拼进 WQL。
+        # 轮询进程表：同名同路径的旧进程还在，就继续等（最多 10 秒）。
+        # 取回全部进程再在脚本里比对，既避免把路径拼进 WQL，也避免
+        # WMI 不可用时整段脚本直接报错退出、新程序反而开不起来。
+        'wmiOk = False\r\n'
+        'On Error Resume Next\r\n'
         'Set svc = GetObject("winmgmts:\\\\.\\root\\cimv2")\r\n'
-        'For j = 1 To 20\r\n'
-        '  busy = False\r\n'
-        '  On Error Resume Next\r\n'
-        '  Set col = svc.ExecQuery("Select * from Win32_Process")\r\n'
-        '  For Each pr In col\r\n'
-        '    If LCase(pr.Name & "") = exeName Then\r\n'
-        '      If LCase(pr.ExecutablePath & "") = tgtL Then busy = True\r\n'
-        '    End If\r\n'
+        'If Err.Number = 0 Then wmiOk = True\r\n'
+        'Err.Clear\r\n'
+        'On Error GoTo 0\r\n'
+        'If wmiOk Then\r\n'
+        '  For j = 1 To 20\r\n'
+        '    busy = False\r\n'
+        '    On Error Resume Next\r\n'
+        '    Set col = svc.ExecQuery("Select * from Win32_Process")\r\n'
+        '    For Each pr In col\r\n'
+        '      If LCase(pr.Name & "") = exeName Then\r\n'
+        '        pth = LCase(pr.ExecutablePath & "")\r\n'
+        '        If Len(pth) >= tailLen Then\r\n'
+        '          If Right(pth, tailLen) = tailKey Then busy = True\r\n'
+        '        End If\r\n'
+        '      End If\r\n'
+        '    Next\r\n'
+        '    Err.Clear\r\n'
+        '    On Error GoTo 0\r\n'
+        '    If Not busy Then Exit For\r\n'
+        '    WScript.Sleep 500\r\n'
         '  Next\r\n'
-        '  On Error GoTo 0\r\n'
-        '  If Not busy Then Exit For\r\n'
-        '  WScript.Sleep 500\r\n'
-        'Next\r\n'
-        'WScript.Sleep 1200\r\n'
+        'End If\r\n'
+        'WScript.Sleep 2000\r\n'
         # 升级完一定要把程序重新开起来。用 Chr(34) 拼引号：直接写四层
         # 引号在带空格 / 中文的路径上容易被 Run 解析错，导致「升级后没反应」。
         'On Error Resume Next\r\n'
