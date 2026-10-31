@@ -108,9 +108,17 @@ class Launcher(object):
         self.cards = []
         self._last_cols = 0
         self._empty_frame = None
+        self._empty_showing = False
         self._laid_n = -1
         self._sort = self.store.settings.get("sort", "manual")
         self._hit = None
+        # 缩放/最大化期间合并重绘请求，防止连续 Configure 把界面拖死
+        self._hdr_pending = False
+        self._hdr_size = (0, 0)
+        self._layout_pending = False
+        self._resize_at = 0.0
+        self._repaint_at = 0.0
+        self._repaint_deferred = False
 
         self._setup_style()
         self._build_ui()
@@ -433,6 +441,21 @@ class Launcher(object):
         """
         if getattr(self, "_repaint_busy", False):
             return
+        if not pump:
+            now = time.time()
+            # 最大化 / 拖边缘时窗口还没稳定，此刻同步重绘会把消息循环卡住；
+            # 等尺寸停下来 0.25 秒后再补一次。
+            if now - getattr(self, "_resize_at", 0.0) < 0.25:
+                if not self._repaint_deferred:
+                    self._repaint_deferred = True
+                    try:
+                        self.root.after(320, self._repaint_later)
+                    except Exception:
+                        self._repaint_deferred = False
+                return
+            if now - getattr(self, "_repaint_at", 0.0) < 0.2:
+                return
+            self._repaint_at = now
         self._repaint_busy = True
         try:
             try:
@@ -539,7 +562,7 @@ class Launcher(object):
         self.head_cv = tk.Canvas(self.header, bg=T.BG_HEAD_B,
                                  highlightthickness=0, bd=0)
         self.head_cv.pack(fill="both", expand=True)
-        self.head_cv.bind("<Configure>", lambda e: self._draw_header())
+        self.head_cv.bind("<Configure>", self._on_header_configure)
 
         body = tk.Frame(self.root, bg=T.BG_APP)
         body.pack(fill="both", expand=True)
@@ -549,6 +572,27 @@ class Launcher(object):
         self._build_footer()
 
     # -------------------------------------------------- 顶栏
+    def _on_header_configure(self, _=None):
+        """顶栏尺寸变化：合并同一批事件，并且尺寸没变就不重画。"""
+        if self._hdr_pending:
+            return
+        self._hdr_pending = True
+        try:
+            self.root.after_idle(self._flush_header)
+        except Exception:
+            self._hdr_pending = False
+
+    def _flush_header(self):
+        self._hdr_pending = False
+        try:
+            size = (self.head_cv.winfo_width(), self.head_cv.winfo_height())
+        except Exception:
+            return
+        if size == self._hdr_size:
+            return
+        self._hdr_size = size
+        self._draw_header()
+
     def _draw_header(self):
         c = self.head_cv
         w = max(1, c.winfo_width())
@@ -837,7 +881,7 @@ class Launcher(object):
         wrap.pack(fill="both", expand=True)
         self.area = W.ScrollArea(wrap, bg=T.BG_APP, padding=(18, 8, 22, 24))
         self.area.pack(fill="both", expand=True)
-        self.area.canvas.bind("<Configure>", lambda e: self._layout_cards(), add="+")
+        self.area.canvas.bind("<Configure>", self._on_area_configure, add="+")
         self.area.inner.bind("<Button-3>", self._blank_menu)
 
     # -------------------------------------------------- 底栏
@@ -872,7 +916,25 @@ class Launcher(object):
         # 退出：Alt+F4 在部分 Tk/Windows 组合下收不到，
         # 另外给一个明确的快捷键和按钮，保证一定关得掉
         r.bind("<Control-q>", lambda e: self._quit())
+        r.bind("<Configure>", self._on_root_configure, add="+")
         r.protocol("WM_DELETE_WINDOW", self._quit)
+
+    def _on_root_configure(self, _=None):
+        """窗口尺寸变化（含最大化/还原）的时间戳。"""
+        self._resize_at = time.time()
+        if self._repaint_deferred:
+            return
+        self._repaint_deferred = True
+        try:
+            self.root.after(360, self._repaint_later)
+        except Exception:
+            self._repaint_deferred = False
+
+    def _repaint_later(self):
+        self._repaint_deferred = False
+        if getattr(self, "_closing", False):
+            return
+        self._force_repaint()
 
     def _focus_search(self):
         try:
@@ -985,10 +1047,12 @@ class Launcher(object):
             self._build_empty()
         try:
             self._empty_frame.pack(pady=(70, 0))
+            self._empty_showing = True
         except Exception:
             pass
 
     def _hide_empty(self):
+        self._empty_showing = False
         ef = getattr(self, "_empty_frame", None)
         if ef is not None:
             try:
@@ -1037,8 +1101,29 @@ class Launcher(object):
         self._hide_cards()
         self._show_empty()
 
+    # -------------------------------------------------- 卡片布局
+    def _on_area_configure(self, _=None):
+        if self._layout_pending:
+            return
+        self._layout_pending = True
+        try:
+            self.root.after_idle(self._flush_layout)
+        except Exception:
+            self._layout_pending = False
+
+    def _flush_layout(self):
+        self._layout_pending = False
+        try:
+            self._layout_cards()
+        except Exception:
+            pass
+
     def _layout_cards(self, visible=None):
         if not self.cards:
+            return
+        # 空态用的是 pack，卡片用的是 grid；同一个父容器不能混用。
+        # 空态显示期间（尤其是窗口最大化触发 <Configure>）绝不能去 grid。
+        if getattr(self, "_empty_showing", False):
             return
         # 按「卡片区实际能放下几列」来算，别再强制至少 7 列 ——
         # 小屏（比如 1200x720）上强制 7 列会让第 7 列被裁掉，
@@ -2217,6 +2302,124 @@ class GroupRecoverDialog(W.BaseDialog):
             self.ent.focus_set()
 
 
+class GroupHintsDialog(W.BaseDialog):
+    """设置密保：成组的问题 + 答案，答对任意一组即可找回密码。"""
+
+    CN = "一二三四五六七八九十"
+
+    def __init__(self, master, bank, hints=None):
+        W.BaseDialog.__init__(self, master, "设置密保",
+                              emoji_img=bank.get("lock", 28),
+                              width=470, height=470,
+                              subtitle="答对任意一组即可找回密码")
+        self.bank = bank
+        self.F = T.fonts()
+        self.hints = []
+        self._vars = [(tk.StringVar(value=h.get("q", "")),
+                       tk.StringVar(value=h.get("a", "")))
+                      for h in (hints or [])]
+        # 对齐参考样式：默认给三组问题位，留空的不保存
+        while len(self._vars) < 3:
+            self._vars.append((tk.StringVar(), tk.StringVar()))
+        self._build()
+
+    def _num(self, i):
+        return self.CN[i] if i < len(self.CN) else str(i + 1)
+
+    def _build(self):
+        body = tk.Frame(self.body, bg=T.BG_APP)
+        body.pack(fill="both", expand=True, padx=26, pady=(14, 8))
+        tk.Label(body,
+                 text="为了避免遗忘，请您填写真实信息，这将帮助您以后通过密保问题找回密码",
+                 bg=T.BG_APP, fg=T.TEXT_SUB, font=self.F["small"],
+                 wraplength=410, justify="left").pack(anchor="w")
+        self.box = tk.Frame(body, bg=T.BG_APP)
+        self.box.pack(fill="x", pady=(10, 0))
+        self._render_rows()
+        W.RoundButton(body, text="＋ 添加问题",
+                      emoji_img=self.bank.get("plus", 16),
+                      variant="plain", width=126, height=30, bg=T.BG_APP,
+                      command=self._add).pack(anchor="w", pady=(2, 0))
+        self.lbl_err = tk.Label(body, text="", bg=T.BG_APP, fg=T.DANGER_DK,
+                                font=self.F["tiny"], anchor="w", justify="left",
+                                wraplength=410)
+        self.lbl_err.pack(anchor="w", pady=(4, 0))
+        self.add_footer_buttons(ok_text="保存", cancel_text="取消",
+                                ok_emoji=self.bank.get("check", 18),
+                                cancel_emoji=self.bank.get("cross", 18),
+                                on_ok=self._save)
+        if self._entries:
+            self._entries[0].focus_set()
+
+    def _render_rows(self):
+        for w in self.box.winfo_children():
+            w.destroy()
+        self._entries = []
+        self._labels = []
+        for i, (vq, va) in enumerate(self._vars):
+            card = tk.Frame(self.box, bg=T.BG_APP)
+            card.pack(fill="x", pady=(0, 8))
+            row_q = tk.Frame(card, bg=T.BG_APP)
+            row_q.pack(fill="x")
+            lq = tk.Label(row_q, text="问题%s：" % self._num(i), bg=T.BG_APP,
+                          fg=T.TEXT_SUB, font=self.F["small_b"], width=5,
+                          anchor="e")
+            lq.pack(side="left")
+            self._labels.append(lq)
+            fq = tk.Frame(row_q, bg=T.LINE_STRONG)
+            fq.pack(side="left", fill="x", expand=True, padx=(4, 0))
+            eq = tk.Entry(fq, textvariable=vq, font=self.F["small"],
+                          bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
+                          insertbackground=T.ACCENT)
+            eq.pack(fill="x", padx=2, pady=2)
+            if len(self._vars) > 1:
+                x = tk.Label(row_q, image=self.bank.get("cross", 16),
+                             bg=T.BG_APP, cursor="hand2")
+                x.pack(side="left", padx=(6, 0))
+                x.bind("<Button-1>", lambda e, idx=i: self._del(idx))
+            row_a = tk.Frame(card, bg=T.BG_APP)
+            row_a.pack(fill="x", pady=(4, 0))
+            tk.Label(row_a, text="答案：", bg=T.BG_APP, fg=T.TEXT_SUB,
+                     font=self.F["small_b"], width=5, anchor="e").pack(side="left")
+            fa = tk.Frame(row_a, bg=T.LINE_STRONG)
+            fa.pack(side="left", fill="x", expand=True, padx=(4, 0))
+            ea = tk.Entry(fa, textvariable=va, font=self.F["small"],
+                          bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
+                          insertbackground=T.ACCENT)
+            ea.pack(fill="x", padx=2, pady=2)
+            self._entries.append(eq)
+
+    def _add(self):
+        self._vars.append((tk.StringVar(), tk.StringVar()))
+        self._render_rows()
+        try:
+            self._entries[-1].focus_set()
+        except Exception:
+            pass
+
+    def _del(self, idx):
+        if len(self._vars) <= 1:
+            return
+        self._vars.pop(idx)
+        self._render_rows()
+
+    def _save(self):
+        rows = [{"q": vq.get().strip(), "a": va.get().strip()}
+                for vq, va in self._vars]
+        filled = [h for h in rows if h["q"] or h["a"]]
+        if not filled:
+            self.lbl_err.configure(text="请至少填写一组密保问题")
+            return
+        for i, h in enumerate(rows):
+            if (h["q"] or h["a"]) and not (h["q"] and h["a"]):
+                self.lbl_err.configure(
+                    text="第%s组的问题和答案都要填完整" % self._num(i))
+                return
+        self.hints = [h for h in rows if h["q"] and h["a"]]
+        self._result = True
+        self.destroy()
+
+
 class GroupDialog(W.BaseDialog):
 
     def __init__(self, master, bank, store, group=None, focus_icon=False,
@@ -2234,12 +2437,9 @@ class GroupDialog(W.BaseDialog):
         self.emoji_name = (group or {}).get("emoji", "folder2")
         self.color = (group or {}).get("color", T.GROUP_COLORS[0])
         self.var_pw = tk.StringVar(value=(group or {}).get("password", ""))
-        # 密码提示按分类独立保存，可多条；至少保留一行输入框
-        self._hint_vars = [(tk.StringVar(value=h.get("q", "")),
-                            tk.StringVar(value=h.get("a", "")))
-                           for h in (group or {}).get("pw_hints", [])]
-        if not self._hint_vars:
-            self._hint_vars = [(tk.StringVar(), tk.StringVar())]
+        # 密保问答按分类独立保存，可在「设置密保」里增删
+        self.hints = [{"q": h.get("q", ""), "a": h.get("a", "")}
+                      for h in (group or {}).get("pw_hints", [])]
         self._show_pw = False
         self._focus_pw = focus_pw
         self._build()
@@ -2299,21 +2499,27 @@ class GroupDialog(W.BaseDialog):
         eye.pack(side="left", padx=(8, 0))
         eye.bind("<Button-1>", lambda e: self._toggle_pw())
 
-        tk.Label(body, text="密码提示（忘记密码时回答问题找回，可加多条）",
+        tk.Label(body, text="密保问题（忘记密码时回答任意一组即可找回）",
                  bg=T.BG_APP, fg=T.TEXT_SUB, font=self.F["small_b"]
                  ).pack(anchor="w", pady=(8, 0))
-        self.hint_box = tk.Frame(body, bg=T.BG_APP)
-        self.hint_box.pack(fill="x", pady=(2, 0))
-        self._render_hint_rows()
-        W.RoundButton(body, text="＋ 添加提示", emoji_img=self.bank.get("plus", 16),
-                      variant="plain", width=126, height=30, bg=T.BG_APP,
-                      command=self._add_hint).pack(anchor="w", pady=(4, 6))
+        hint_row = tk.Frame(body, bg=T.BG_APP)
+        hint_row.pack(fill="x", pady=(6, 6))
+        self.lbl_hints = tk.Label(hint_row, text="", bg=T.BG_APP,
+                                  fg=T.TEXT_SUB, font=self.F["small"],
+                                  anchor="w")
+        self.lbl_hints.pack(side="left")
+        self.btn_hints = W.RoundButton(
+            hint_row, text="设置密保问题…",
+            emoji_img=self.bank.get("lock", 16), variant="plain",
+            width=150, height=32, bg=T.BG_APP, command=self._edit_hints)
+        self.btn_hints.pack(side="right")
+        self._paint_hints()
 
         self.lbl_err = tk.Label(body, text="", bg=T.BG_APP, fg=T.DANGER_DK,
                                 font=self.F["tiny"], anchor="w", justify="left",
                                 wraplength=400)
         self.lbl_err.pack(anchor="w")
-        tk.Label(body, text="密码留空 = 不加密；设了密码至少要有一条提示。"
+        tk.Label(body, text="密码留空 = 不加密；设置了密码需要至少一组密保问题。"
                             "输对密码后 24 小时内免输。",
                  bg=T.BG_APP, fg=T.TEXT_SUB, font=self.F["tiny"],
                  anchor="w", justify="left", wraplength=400).pack(anchor="w")
@@ -2347,50 +2553,29 @@ class GroupDialog(W.BaseDialog):
         self._show_pw = not self._show_pw
         self.ent_pw.configure(show="" if self._show_pw else "●")
 
-    def _render_hint_rows(self):
-        for w in self.hint_box.winfo_children():
-            w.destroy()
-        self._hint_entries = []
-        for i, (vq, va) in enumerate(self._hint_vars):
-            row = tk.Frame(self.hint_box, bg=T.BG_APP)
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text="提示 %d" % (i + 1), bg=T.BG_APP,
-                     fg=T.TEXT_SUB, font=self.F["tiny"]).pack(
-                side="left", anchor="n", pady=(9, 0))
-            col = tk.Frame(row, bg=T.BG_APP)
-            col.pack(side="left", fill="x", expand=True, padx=(6, 4))
-            fq = tk.Frame(col, bg=T.LINE_STRONG)
-            fq.pack(fill="x")
-            eq = tk.Entry(fq, textvariable=vq, font=self.F["small"],
-                          bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
-                          insertbackground=T.ACCENT)
-            eq.pack(fill="x", padx=2, pady=2)
-            fa = tk.Frame(col, bg=T.LINE_STRONG)
-            fa.pack(fill="x", pady=(3, 0))
-            ea = tk.Entry(fa, textvariable=va, font=self.F["small"],
-                          bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
-                          insertbackground=T.ACCENT)
-            ea.pack(fill="x", padx=2, pady=2)
-            self._hint_entries.append(eq)
-            if len(self._hint_vars) > 1:
-                x = tk.Label(row, image=self.bank.get("cross", 16),
-                             bg=T.BG_APP, cursor="hand2")
-                x.pack(side="left", padx=(0, 2))
-                x.bind("<Button-1>", lambda e, idx=i: self._del_hint(idx))
-
-    def _add_hint(self):
-        self._hint_vars.append((tk.StringVar(), tk.StringVar()))
-        self._render_hint_rows()
+    def _edit_hints(self):
+        dlg = GroupHintsDialog(self, self.bank, self.hints)
+        ok = dlg.show()
         try:
-            self._hint_entries[-1].focus_set()
+            self.grab_set()
         except Exception:
             pass
+        if ok:
+            self.hints = dlg.hints
+            self.lbl_err.configure(text="")
+            self._paint_hints()
 
-    def _del_hint(self, idx):
-        if len(self._hint_vars) <= 1:
-            return
-        self._hint_vars.pop(idx)
-        self._render_hint_rows()
+    def _paint_hints(self):
+        n = len(self.hints)
+        if n:
+            self.lbl_hints.configure(text="已设置 %d 组密保问题" % n,
+                                     fg=T.ACCENT_DK)
+        else:
+            self.lbl_hints.configure(text="还未设置", fg=T.TEXT_MUTED)
+        try:
+            self.btn_hints.set_text("修改密保问题…" if n else "设置密保问题…")
+        except Exception:
+            pass
 
     def _pick(self):
         dlg = W.EmojiPickerDialog(self, self.bank, self.emoji_name)
@@ -2404,18 +2589,11 @@ class GroupDialog(W.BaseDialog):
         if not name:
             name = "新分类"
         pw = self.var_pw.get()
-        hints = [{"q": vq.get().strip(), "a": va.get().strip()}
-                 for vq, va in self._hint_vars]
-        hints = [h for h in hints if h["q"] or h["a"]]
-        if pw:
-            if not hints:
-                self.lbl_err.configure(
-                    text="设置了密码，至少要填一条密码提示（问题和答案）")
-                return
-            if any(not h["q"] or not h["a"] for h in hints):
-                self.lbl_err.configure(
-                    text="每条密码提示的问题和答案都要填完整")
-                return
+        hints = [dict(h) for h in self.hints if h.get("q") and h.get("a")]
+        if pw and not hints:
+            self.lbl_err.configure(
+                text="设置了密码，请先点「设置密保问题…」填写密保问答")
+            return
         if self.is_new:
             self.store.add_group(name, self.emoji_name, self.color, pw, hints)
         else:

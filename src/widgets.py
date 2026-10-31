@@ -208,6 +208,8 @@ class ScrollArea(tk.Frame):
         self._sb = None
         self._drag_from = None
         self._sb_h = 60
+        self._inner_w = -1
+        self._conf_pending = False
 
         self.canvas.bind("<Configure>", self._on_canvas_conf)
         self.inner.bind("<Configure>", self._on_inner_conf)
@@ -219,19 +221,39 @@ class ScrollArea(tk.Frame):
         widget.bind("<MouseWheel>", self._on_wheel)
         return widget
 
+    # 最大化 / 拖动边缘时会连续抛出大量 <Configure>；这里合并到空闲时
+    # 只处理一次，避免每个事件都重设宽度、重画滚动条把界面拖住。
     def _on_canvas_conf(self, _=None):
-        self._resize_inner()
-        self._draw_scrollbar()
+        self._schedule()
 
     def _on_inner_conf(self, _=None):
-        self._resize_inner()
-        self._draw_scrollbar()
+        self._schedule()
+
+    def _schedule(self):
+        if self._conf_pending:
+            return
+        self._conf_pending = True
+        try:
+            self.after_idle(self._flush_conf)
+        except Exception:
+            self._conf_pending = False
+
+    def _flush_conf(self):
+        self._conf_pending = False
+        try:
+            self._resize_inner()
+            self._draw_scrollbar()
+        except Exception:
+            pass
 
     def _resize_inner(self):
         cw = self.canvas.winfo_width()
         iw = self.inner.winfo_reqwidth()
         l, t, r, b = self.padding
-        self.canvas.itemconfigure(self._win, width=max(cw, iw + l + r))
+        width = max(cw, iw + l + r)
+        if width != self._inner_w:
+            self._inner_w = width
+            self.canvas.itemconfigure(self._win, width=width)
         self.canvas.coords(self._win, l, t)
 
     def _on_wheel(self, event):
@@ -241,11 +263,12 @@ class ScrollArea(tk.Frame):
         self._draw_scrollbar()
 
     def _draw_scrollbar(self):
-        self.canvas.delete("sb")
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         total = self.inner.winfo_reqheight() + self.padding[1] + self.padding[3]
         if total <= ch or ch <= 1:
+            if self._sb is not None:
+                self.canvas.itemconfigure(self._sb, state="hidden")
             return
         top, bottom = self.canvas.yview()
         bar_h = max(36, int(ch * (bottom - top)))
@@ -257,9 +280,10 @@ class ScrollArea(tk.Frame):
                                fill=T.LINE_STRONG, outline="", tags="sb")
             self.canvas.tag_bind("sb", "<Button-1>", self._sb_press)
             self.canvas.tag_bind("sb", "<B1-Motion>", self._sb_motion)
+            self.canvas.tag_raise("sb")
         else:
+            self.canvas.itemconfigure(self._sb, state="normal")
             self.canvas.coords(self._sb, *T.rounded_rect_points(x0, y0, x1, y0 + bar_h, 3))
-        self.canvas.tag_raise("sb")
 
     def _sb_press(self, event):
         self._drag_from = (event.y, self.canvas.yview()[0])
@@ -719,9 +743,27 @@ class BaseDialog(tk.Toplevel):
             master.update_idletasks()
             x = master.winfo_rootx() + (master.winfo_width() - w) // 2
             y = master.winfo_rooty() + (master.winfo_height() - h) // 3
+            # 小屏幕 / 任务栏占位时别把对话框底部（保存按钮）挤出屏幕
+            l, t, r, b = self._work_area()
+            if r > l and b > t:
+                x = min(max(l + 4, x), max(l + 4, r - w - 4))
+                y = min(max(t + 4, y), max(t + 4, b - h - 4))
             self.geometry("%dx%d+%d+%d" % (w, h, max(0, x), max(0, y)))
         except Exception:
             self.geometry("%dx%d" % (w, h))
+
+    @staticmethod
+    def _work_area():
+        try:
+            import ctypes
+            from ctypes import wintypes
+            r = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(r), 0):
+                return r.left, r.top, r.right, r.bottom
+        except Exception:
+            pass
+        return 0, 0, 0, 0
 
     def show(self):
         # 关键：内容可能比预设高度高（实测「新建分类」对话框需要 388px，

@@ -99,23 +99,39 @@ def main():
         gd.var_name.set("私密2")
         gd.var_pw.set("abc")
         gd._save()
-        check("有密码缺提示时拒绝保存",
-              gd.winfo_exists() and "提示" in gd.lbl_err.cget("text"))
-        gd._hint_vars[0][0].set("我的生日？")
-        gd._hint_vars[0][1].set("0101")
-        gd._add_hint()
-        gd._hint_vars[1][0].set("我的学校？")
-        gd._hint_vars[1][1].set("一中")
+        check("有密码缺密保时拒绝保存",
+              gd.winfo_exists() and "密保" in gd.lbl_err.cget("text"))
+
+        hd = M.GroupHintsDialog(root, bank, gd.hints)
+        hd.update_idletasks()
+        check("密保默认三组问答", len(hd._vars) == 3)
+        hd._save()
+        check("密保全空时拒绝保存",
+              hd.winfo_exists() and "至少" in hd.lbl_err.cget("text"))
+        hd._vars[0][0].set("我的生日？")
+        hd._save()
+        check("只填问题不给答案时拒绝",
+              hd.winfo_exists() and "第" in hd.lbl_err.cget("text"))
+        hd._vars[0][1].set("0101")
+        hd._add()
+        hd._vars[-1][0].set("我的学校？")
+        hd._vars[-1][1].set("一中")
+        hd._save()
+        check("密保保存成功并去掉空行",
+              hd._result is True and len(hd.hints) == 2)
+
+        gd.hints = hd.hints
+        gd._paint_hints()
         gd._save()
         g2s = [x for x in st.groups if x["name"] == "私密2"]
-        check("多提示保存成功", len(g2s) == 1 and g2s[0]["password"] == "abc"
+        check("多组密保保存成功", len(g2s) == 1 and g2s[0]["password"] == "abc"
               and len(g2s[0]["pw_hints"]) == 2)
 
         ed = M.GroupDialog(root, bank, st, st.group_by_id(gid))
         ed.update_idletasks()
-        check("编辑时密码/多条提示已回填",
-              ed.var_pw.get() == "mima123" and len(ed._hint_vars) == 2
-              and ed._hint_vars[1][0].get() == "my city?")
+        check("编辑时密码/多组密保已回填",
+              ed.var_pw.get() == "mima123" and len(ed.hints) == 2
+              and ed.hints[1]["q"] == "my city?")
         ed.var_pw.set("")
         ed._save()
         check("清空密码后不再上锁", not st.group_locked(gid)
