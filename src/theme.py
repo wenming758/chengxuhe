@@ -96,6 +96,7 @@ def fonts():
         "body_b": (UI_FONT, 10, "bold"),
         "small": (UI_FONT, 9),
         "small_b": (UI_FONT, 9, "bold"),
+        "bless": (UI_FONT, 12, "bold"),
         "tiny": (UI_FONT, 8),
         "tiny_b": (UI_FONT, 8, "bold"),
         "card_title": (UI_FONT, 10, "bold"),

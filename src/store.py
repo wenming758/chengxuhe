@@ -15,7 +15,7 @@ import pngutil
 
 APP_TITLE = "程序收纳盒"
 VERSION = "1.0.0"          # 内部版本号（勿随意改动）
-APP_VERSION = "v0.1.11"    # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
+APP_VERSION = "v0.1.12"    # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
 AUTHOR = "wenming758"      # 软件作者
 
 # 在线升级（优先 Gitee，仓库不可达时退回 GitHub）
@@ -297,6 +297,15 @@ class Store(object):
         if (password or "") != g.get("password"):
             return False
         g["unlocked_at"] = time.time()
+        self.save()
+        return True
+
+    def lock_group(self, gid):
+        """手动重新上锁：清掉解锁时间，下次进入该分类必须重新输密码。"""
+        g = self.group_by_id(gid)
+        if not g or not g.get("password"):
+            return False
+        g["unlocked_at"] = 0
         self.save()
         return True
 

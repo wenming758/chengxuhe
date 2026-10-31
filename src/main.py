@@ -632,12 +632,12 @@ class Launcher(object):
             return
         left = self.BLESS_LEFT
         right = getattr(self, "_search_x", w) - 14
-        if right - left < 250:
+        if right - left < 290:
             return
-        font = self.F["small_b"]
-        img = self.bank.get(item[0], 18)
-        icon_w = 22 if img is not None else 0
-        text = T.ellipsis(item[1], font, right - left - 28 - icon_w)
+        font = self.F["bless"]
+        img = self.bank.get(item[0], 28)
+        icon_w = 34 if img is not None else 0
+        text = T.ellipsis(item[1], font, right - left - 36 - icon_w)
 
         tid = c.create_text(0, 0, text=text, anchor="w", font=font,
                             fill="#FFFFFF")
@@ -645,15 +645,15 @@ class Launcher(object):
         c.delete(tid)
         if not bb:
             return
-        gw = icon_w + 6 + (bb[2] - bb[0])
+        gw = icon_w + 7 + (bb[2] - bb[0])
         x0 = left + max(0, (right - left - gw) // 2)
         cy = h // 2
-        T.pill(c, x0 - 14, cy - 17, x0 + gw + 14, cy + 17,
+        T.pill(c, x0 - 14, cy - 21, x0 + gw + 14, cy + 21,
                fill=T.lighten(self._head_bg_at(x0 + gw / 2.0, w), 0.26),
                tags="bless")
         if img is not None:
-            c.create_image(x0 + 11, cy, image=img, tags="bless")
-        c.create_text(x0 + icon_w + 6, cy, text=text, anchor="w", font=font,
+            c.create_image(x0 + icon_w // 2, cy, image=img, tags="bless")
+        c.create_text(x0 + icon_w + 7, cy, text=text, anchor="w", font=font,
                       fill="#FFFFFF", tags="bless")
 
     def _rotate_blessing(self):
@@ -930,6 +930,10 @@ class Launcher(object):
 
         right = tk.Frame(bar, bg=T.BG_APP)
         right.pack(side="right", padx=(0, 18), pady=9)
+        # 只在加密分类里出现，见 refresh()
+        self.btn_lock = W.RoundButton(
+            right, text="锁定", emoji_img=self.bank.get("lock", 18), variant="plain",
+            width=96, height=34, bg=T.BG_APP, command=self.lock_current_group)
         self.btn_sort = W.RoundButton(
             right, text="", emoji_img=self.bank.get("sort", 18), variant="plain",
             width=146, height=34, bg=T.BG_APP, command=self.menu_sort)
@@ -1063,6 +1067,7 @@ class Launcher(object):
             self.cur_group, self.store.group_name(self.cur_group))
         self.lbl_count.configure(text="%s · 共 %d 个程序" % (gname, len(items)))
         self.btn_sort.set_text("排序：%s" % dict((k, v) for k, v, _ in SORT_LABELS).get(self._sort, "自定义顺序"))
+        self._update_lock_button()
 
         if not items:
             # 空态：只在第一次构建，之后复用（反复 destroy/build 是切分类卡顿元凶）
@@ -1107,6 +1112,26 @@ class Launcher(object):
         self._layout_cards(visible=n_need)
         if reset_scroll:
             self.area.scroll_top()
+
+    def _update_lock_button(self):
+        """当前分类带密码且正处于解锁状态时，工具条上才出现「锁定」按钮。"""
+        g = self.store.group_by_id(self.cur_group)
+        if g is not None and g.get("password") and not self.store.group_locked(g["id"]):
+            if not self.btn_lock.winfo_ismapped():
+                self.btn_lock.pack(side="left", padx=(0, 8), before=self.btn_sort)
+        else:
+            self.btn_lock.pack_forget()
+
+    def lock_current_group(self):
+        """重新锁上当前加密分类：退回「全部程序」，再进来必须重新输密码。"""
+        gid = self.cur_group
+        name = self.store.group_name(gid)
+        if not self.store.lock_group(gid):
+            return
+        self._render_groups()
+        self._select_group(S.G_ALL)
+        self.toast.show("已锁定「%s」" % name, self.bank.get("lock", 18))
+        self.set_status("分类「%s」已重新上锁，再进入需要输入密码" % name)
 
     def _show_empty(self):
         """显示空态（首次才真正构建，之后只 pack/forget）。"""
