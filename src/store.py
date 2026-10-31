@@ -15,7 +15,7 @@ import pngutil
 
 APP_TITLE = "程序收纳盒"
 VERSION = "1.0.0"          # 内部版本号（勿随意改动）
-APP_VERSION = "v0.1.4"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
+APP_VERSION = "v0.1.5"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
 AUTHOR = "wenming758"      # 软件作者
 
 # 在线升级（优先 Gitee，仓库不可达时退回 GitHub）
@@ -33,6 +33,9 @@ ICON_FORMAT = 2
 G_ALL = "__all__"
 G_FAV = "__fav__"
 G_RECENT = "__recent__"
+
+# 分类密码解锁后的有效期：24 小时
+LOCK_SECONDS = 24 * 3600
 
 DEFAULT_GROUPS = [
     {"id": "g_default", "name": "未分类", "emoji": "box", "color": "#FF8A3D"},
@@ -112,6 +115,19 @@ def now_str():
     return time.strftime("%Y-%m-%d %H:%M")
 
 
+def normalize_hints(hints):
+    """密码提示统一成 [{"q": 问题, "a": 答案}]，全空的条目丢掉。"""
+    out = []
+    for h in hints or []:
+        if not isinstance(h, dict):
+            continue
+        q = str(h.get("q", "")).strip()
+        a = str(h.get("a", "")).strip()
+        if q or a:
+            out.append({"q": q, "a": a})
+    return out
+
+
 class Store(object):
     def __init__(self, path, icon_dir):
         self.path = path
@@ -147,6 +163,18 @@ class Store(object):
                     break
             groups.insert(insert_at, dict(DEFAULT_GROUPS[1]))
         self.groups = groups
+        # 分类密码：默认留空 = 不加密；unlocked_at 是最近一次输对密码的时间。
+        # 密码提示按分类独立保存，可有多条；老数据里的单条 pw_q/pw_a 自动迁移。
+        for g in self.groups:
+            g.setdefault("password", "")
+            g.setdefault("unlocked_at", 0)
+            hints = normalize_hints(g.get("pw_hints"))
+            if not hints and (g.get("pw_q") or g.get("pw_a")):
+                hints = normalize_hints([{"q": g.get("pw_q", ""),
+                                          "a": g.get("pw_a", "")}])
+            g["pw_hints"] = hints
+            g.pop("pw_q", None)
+            g.pop("pw_a", None)
         self.items = raw.get("items") or []
         st = raw.get("settings") or {}
         self.settings = {
@@ -232,9 +260,12 @@ class Store(object):
         g = self.group_by_id(gid)
         return g["name"] if g else "未分类"
 
-    def add_group(self, name, emoji="folder2", color="#FF8A3D"):
+    def add_group(self, name, emoji="folder2", color="#FF8A3D", password="",
+                  hints=None):
         g = {"id": "g_" + uuid.uuid4().hex[:8], "name": name,
-             "emoji": emoji, "color": color}
+             "emoji": emoji, "color": color,
+             "password": password or "", "unlocked_at": 0,
+             "pw_hints": normalize_hints(hints)}
         self.groups.append(g)
         self.save()
         return g
@@ -246,6 +277,59 @@ class Store(object):
             self.save()
         return g
 
+    # -------------------------------------------------- 分类密码
+    def group_locked(self, gid):
+        """分类是否处于「需要输密码」状态（没过密码 / 解锁已超 24 小时）。"""
+        g = self.group_by_id(gid)
+        if not g or not g.get("password"):
+            return False
+        try:
+            at = float(g.get("unlocked_at") or 0)
+        except Exception:
+            at = 0
+        return (time.time() - at) >= LOCK_SECONDS
+
+    def unlock_group(self, gid, password):
+        """校验密码；正确则记住解锁时间（24 小时内免输），返回是否通过。"""
+        g = self.group_by_id(gid)
+        if not g or not g.get("password"):
+            return True
+        if (password or "") != g.get("password"):
+            return False
+        g["unlocked_at"] = time.time()
+        self.save()
+        return True
+
+    def set_group_password(self, gid, password, hints=None):
+        """设置 / 修改 / 清空分类密码；只要密码变了就重新上锁。"""
+        g = self.group_by_id(gid)
+        if not g:
+            return None
+        password = password or ""
+        if password != (g.get("password") or ""):
+            g["password"] = password
+            g["unlocked_at"] = 0
+        g["pw_hints"] = normalize_hints(hints)
+        self.save()
+        return g
+
+    def group_hints(self, gid):
+        g = self.group_by_id(gid)
+        if not g:
+            return []
+        return [h for h in normalize_hints(g.get("pw_hints"))
+                if h["q"] and h["a"]]
+
+    def check_group_answer(self, gid, answer):
+        """任意一条密码提示的答案匹配即通过（忽略首尾空格和英文大小写）。"""
+        ans = (answer or "").strip().casefold()
+        if not ans:
+            return False
+        for h in self.group_hints(gid):
+            if ans == h["a"].strip().casefold():
+                return True
+        return False
+
     def remove_group(self, gid, fallback="g_default"):
         """删分类：里面的程序挪到 fallback，不删程序。"""
         self.groups = [g for g in self.groups if g["id"] != gid]
@@ -255,13 +339,22 @@ class Store(object):
         self.save()
 
     def count_of_group(self, gid):
+        items = self._without_locked(self.items, gid)
         if gid == G_ALL:
-            return len(self.items)
+            return len(items)
         if gid == G_FAV:
-            return sum(1 for i in self.items if i.get("pinned"))
+            return sum(1 for i in items if i.get("pinned"))
         if gid == G_RECENT:
-            return sum(1 for i in self.items if i.get("last"))
+            return sum(1 for i in items if i.get("last"))
         return sum(1 for i in self.items if i.get("group") == gid)
+
+    def _without_locked(self, items, gid=None):
+        """锁着的分类里的程序，不从「全部 / 置顶 / 最近」里漏出来。"""
+        locked = {g["id"] for g in self.groups if self.group_locked(g["id"])}
+        if not locked:
+            return items
+        return [i for i in items
+                if i.get("group") not in locked or i.get("group") == gid]
 
     # -------------------------------------------------- 程序条目
     def get(self, aid):
@@ -367,6 +460,7 @@ class Store(object):
             out = [i for i in out if i.get("last")]
         elif gid not in (G_ALL, "", None):
             out = [i for i in out if i.get("group") == gid]
+        out = self._without_locked(out, gid)
 
         kw = (keyword or "").strip().lower()
         if kw:

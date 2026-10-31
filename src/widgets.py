@@ -513,13 +513,15 @@ class GroupRow(tk.Canvas):
     DRAG_THRESHOLD = 5  # 移动超过 5px 才算拖拽，避免误吞单击
 
     def __init__(self, master, gid, name, emoji_img, count, selected, on_click,
-                 on_menu, bg=None, width=196, draggable=False, on_drop=None):
+                 on_menu, bg=None, width=196, draggable=False, on_drop=None,
+                 locked_img=None):
         self.bg = bg or T.BG_SIDE
         tk.Canvas.__init__(self, master, width=width, height=self.H, bg=self.bg,
                            highlightthickness=0, bd=0)
         self.gid = gid
         self.name = name
         self.emoji_img = emoji_img
+        self.locked_img = locked_img
         self.count = count
         self.selected = selected
         self.on_click = on_click
@@ -556,9 +558,12 @@ class GroupRow(tk.Canvas):
             T.rrect(self, 4, 3, w - 4, h - 3, 12, fill=T.BG_HOVER, outline="")
         if self.emoji_img is not None:
             self.create_image(26, h / 2.0, image=self.emoji_img)
-        self.create_text(46, h / 2.0, text=T.ellipsis(self.name, T.fonts()["body_b"], 92),
+        self.create_text(46, h / 2.0, text=T.ellipsis(self.name, T.fonts()["body_b"],
+                                                     76 if self.locked_img else 92),
                          anchor="w", font=T.fonts()["body_b"],
                          fill=T.ACCENT_DK if self.selected else T.TEXT)
+        if self.locked_img is not None:
+            self.create_image(w - 58, h / 2.0, image=self.locked_img)
         if self.count:
             cx = w - 30
             T.rrect(self, cx - 13, h / 2.0 - 9, cx + 13, h / 2.0 + 9, 9,

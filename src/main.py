@@ -95,10 +95,11 @@ class Launcher(object):
                 self.store.save()
         except Exception:
             pass
-        # 记住上次退出时所在的分类；若该分类已被删除则回退到「全部程序」
+        # 记住上次退出时所在的分类；若该分类已被删除或已加锁则回退到「全部程序」
         last = self.store.settings.get("last_group", "")
-        if last and (last in (S.G_ALL, S.G_FAV, S.G_RECENT)
-                     or self.store.group_by_id(last)):
+        if (last and (last in (S.G_ALL, S.G_FAV, S.G_RECENT)
+                      or self.store.group_by_id(last))
+                and not self.store.group_locked(last)):
             self.cur_group = last
         else:
             self.cur_group = S.G_ALL
@@ -709,7 +710,9 @@ class Launcher(object):
                              self.store.count_of_group(gid),
                              self.cur_group == gid, self._select_group,
                              self._group_menu, bg=T.BG_SIDE,
-                             draggable=True, on_drop=self._on_group_drop)
+                             draggable=True, on_drop=self._on_group_drop,
+                             locked_img=(self.bank.get("lock", 16)
+                                         if self.store.group_locked(gid) else None))
             row.pack(fill="x", padx=8, pady=1)
             self._group_rows[gid] = row
         # 拖拽时的插入指示条（默认隐藏）
@@ -889,6 +892,14 @@ class Launcher(object):
     def _select_group(self, gid):
         if gid == self.cur_group:
             return
+        # 加密分类：先过密码，输对后 24 小时内不再询问
+        if self.store.group_locked(gid):
+            dlg = GroupPasswordDialog(self.root, self.bank, self.store, gid)
+            if not dlg.show():
+                return
+            self._render_groups()
+            self.toast.show("已解锁，24 小时内免输密码",
+                            self.bank.get("key", 18))
         self.cur_group = gid
         self.selected_id = None
         # 记住当前分类，下次启动直接进入这里
@@ -1241,6 +1252,9 @@ class Launcher(object):
         self._mi(m, "重命名分类…", "pencil", lambda: self.dialog_edit_group(gid))
         self._mi(m, "换个图标 / 颜色…", "palette",
                  lambda: self.dialog_edit_group(gid, focus_icon=True))
+        g = self.store.group_by_id(gid) or {}
+        self._mi(m, "修改打开密码…" if g.get("password") else "设置打开密码…",
+                 "lock", lambda: self.dialog_edit_group(gid, focus_pw=True))
         m.add_separator()
         self._mi(m, "删除这个分类", "trash", lambda: self.delete_group(gid, name))
         try:
@@ -1435,11 +1449,11 @@ class Launcher(object):
             self._render_groups()
             self.refresh()
 
-    def dialog_edit_group(self, gid, focus_icon=False):
+    def dialog_edit_group(self, gid, focus_icon=False, focus_pw=False):
         g = self.store.group_by_id(gid)
         if not g:
             return
-        dlg = GroupDialog(self.root, self.bank, self.store, g, focus_icon)
+        dlg = GroupDialog(self.root, self.bank, self.store, g, focus_icon, focus_pw)
         if dlg.show():
             self._render_groups()
             self.refresh()
@@ -2047,9 +2061,166 @@ class AppDialog(W.BaseDialog):
 
 
 # ====================================================== 分类对话框
+class GroupPasswordDialog(W.BaseDialog):
+    """进入加密分类前的密码框；输对后 24 小时内免输。"""
+
+    def __init__(self, master, bank, store, gid):
+        self.store = store
+        self.gid = gid
+        g = store.group_by_id(gid) or {}
+        self.gname = g.get("name", "分类")
+        self.has_hint = bool(store.group_hints(gid))
+        W.BaseDialog.__init__(self, master, "输入密码",
+                              emoji_img=bank.get("lock", 28),
+                              width=430, height=280,
+                              subtitle="「%s」已加锁" % self.gname)
+        self.bank = bank
+        self.F = T.fonts()
+        body = tk.Frame(self.body, bg=T.BG_APP)
+        body.pack(fill="both", expand=True, padx=26, pady=18)
+        tk.Label(body, text="请输入打开密码", bg=T.BG_APP, fg=T.TEXT_SUB,
+                 font=self.F["small_b"]).pack(anchor="w")
+        row = tk.Frame(body, bg=T.BG_APP)
+        row.pack(fill="x", pady=(4, 6))
+        f = tk.Frame(row, bg=T.LINE_STRONG)
+        f.pack(side="left", fill="x", expand=True)
+        self.var = tk.StringVar()
+        self.ent = tk.Entry(f, textvariable=self.var, show="●",
+                            font=self.F["body"], bg=T.BG_INPUT, fg=T.TEXT,
+                            relief="flat", bd=0, insertbackground=T.ACCENT)
+        self.ent.pack(fill="x", padx=2, pady=3)
+        self._show = False
+        eye = tk.Label(row, image=bank.get("eyes", 18), bg=T.BG_APP,
+                       cursor="hand2")
+        eye.pack(side="left", padx=(8, 0))
+        eye.bind("<Button-1>", lambda e: self._toggle())
+        self.lbl_err = tk.Label(body, text="", bg=T.BG_APP, fg=T.DANGER_DK,
+                                font=self.F["tiny"], anchor="w")
+        self.lbl_err.pack(anchor="w", pady=(2, 4))
+        if self.has_hint:
+            link = tk.Label(body, text="忘记密码？点这里找回", bg=T.BG_APP,
+                            fg=T.ACCENT_DK, font=self.F["tiny"], cursor="hand2")
+            link.pack(anchor="w")
+            link.bind("<Button-1>", lambda e: self._recover())
+        else:
+            tk.Label(body, text="这个分类没有设置找回问题", bg=T.BG_APP,
+                     fg=T.TEXT_SUB, font=self.F["tiny"]).pack(anchor="w")
+        self.add_footer_buttons(ok_text="解锁", cancel_text="取消",
+                                ok_emoji=bank.get("key", 18),
+                                cancel_emoji=bank.get("cross", 18),
+                                on_ok=self._ok)
+        self.ent.bind("<Return>", lambda e: self._ok())
+        self.ent.focus_set()
+
+    def _toggle(self):
+        self._show = not self._show
+        self.ent.configure(show="" if self._show else "●")
+
+    def _ok(self):
+        if self.store.unlock_group(self.gid, self.var.get()):
+            self._result = True
+            self.destroy()
+        else:
+            self.lbl_err.configure(text="密码不对，再试一次")
+            self.var.set("")
+            self.ent.focus_set()
+
+    def _recover(self):
+        dlg = GroupRecoverDialog(self, self.bank, self.store, self.gid)
+        ok = dlg.show()
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        if ok:
+            self._result = True
+            self.destroy()
+
+
+class GroupRecoverDialog(W.BaseDialog):
+    """答对找回问题后直接显示分类密码，并解锁该分类。"""
+
+    def __init__(self, master, bank, store, gid):
+        self.store = store
+        self.gid = gid
+        g = store.group_by_id(gid) or {}
+        self.gname = g.get("name", "分类")
+        self.hints = store.group_hints(gid)
+        self.password = g.get("password", "")
+        W.BaseDialog.__init__(self, master, "找回密码",
+                              emoji_img=bank.get("key", 28),
+                              width=450, height=300,
+                              subtitle="「%s」" % self.gname)
+        self.F = T.fonts()
+        self._verified = False
+        body = tk.Frame(self.body, bg=T.BG_APP)
+        body.pack(fill="both", expand=True, padx=26, pady=18)
+        if not self.hints:
+            tk.Label(body, text="这个分类没有设置密码提示，\n只能取消后重新设置密码。",
+                     bg=T.BG_APP, fg=T.TEXT_SUB, font=self.F["small"],
+                     justify="left").pack(anchor="w")
+            W.RoundButton(self.footer, text="关闭",
+                          emoji_img=bank.get("cross", 18), variant="plain",
+                          width=104, height=38, bg=T.BG_FOOT,
+                          command=self.on_cancel).pack(side="right", padx=18,
+                                                       pady=12)
+            return
+        tk.Label(body, text="密码提示（答对任意一条即可）", bg=T.BG_APP,
+                 fg=T.TEXT_SUB, font=self.F["small_b"]).pack(anchor="w")
+        tk.Label(body, text="\n".join("%d. %s" % (i + 1, h["q"])
+                                      for i, h in enumerate(self.hints)),
+                 bg=T.BG_APP, fg=T.TEXT, font=self.F["body"],
+                 wraplength=390, justify="left",
+                 anchor="w").pack(anchor="w", pady=(2, 12))
+        tk.Label(body, text="你的答案", bg=T.BG_APP, fg=T.TEXT_SUB,
+                 font=self.F["small_b"]).pack(anchor="w")
+        f = tk.Frame(body, bg=T.LINE_STRONG)
+        f.pack(fill="x", pady=(4, 6))
+        self.var = tk.StringVar()
+        self.ent = tk.Entry(f, textvariable=self.var, font=self.F["body"],
+                            bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
+                            insertbackground=T.ACCENT)
+        self.ent.pack(fill="x", padx=2, pady=3)
+        self.lbl_err = tk.Label(body, text="", bg=T.BG_APP, fg=T.DANGER_DK,
+                                font=self.F["tiny"], anchor="w",
+                                wraplength=390, justify="left")
+        self.lbl_err.pack(anchor="w")
+        self.lbl_pw = tk.Label(body, text="", bg=T.BG_APP, fg=T.ACCENT_DK,
+                               font=self.F["body_b"], anchor="w",
+                               wraplength=390, justify="left")
+        self.lbl_pw.pack(anchor="w", pady=(4, 0))
+        self.add_footer_buttons(ok_text="验证并显示密码", cancel_text="取消",
+                                ok_emoji=bank.get("key", 18),
+                                cancel_emoji=bank.get("cross", 18),
+                                on_ok=self._ok)
+        self.ent.bind("<Return>", lambda e: self._ok())
+        self.ent.focus_set()
+
+    def _ok(self):
+        if self._verified:
+            self._result = True
+            self.destroy()
+            return
+        if self.store.check_group_answer(self.gid, self.var.get()):
+            self._verified = True
+            self.lbl_err.configure(text="")
+            self.lbl_pw.configure(text="密码是：%s" % self.password)
+            self.ent.configure(state="disabled")
+            self.store.unlock_group(self.gid, self.password)
+            try:
+                self.ok_button.set_text("解锁并进入")
+            except Exception:
+                pass
+        else:
+            self.lbl_err.configure(text="答案不对，再试试")
+            self.var.set("")
+            self.ent.focus_set()
+
+
 class GroupDialog(W.BaseDialog):
 
-    def __init__(self, master, bank, store, group=None, focus_icon=False):
+    def __init__(self, master, bank, store, group=None, focus_icon=False,
+                 focus_pw=False):
         self.group = group
         self.store = store
         self.bank = bank
@@ -2062,6 +2233,15 @@ class GroupDialog(W.BaseDialog):
         self.var_name = tk.StringVar(value=(group or {}).get("name", ""))
         self.emoji_name = (group or {}).get("emoji", "folder2")
         self.color = (group or {}).get("color", T.GROUP_COLORS[0])
+        self.var_pw = tk.StringVar(value=(group or {}).get("password", ""))
+        # 密码提示按分类独立保存，可多条；至少保留一行输入框
+        self._hint_vars = [(tk.StringVar(value=h.get("q", "")),
+                            tk.StringVar(value=h.get("a", "")))
+                           for h in (group or {}).get("pw_hints", [])]
+        if not self._hint_vars:
+            self._hint_vars = [(tk.StringVar(), tk.StringVar())]
+        self._show_pw = False
+        self._focus_pw = focus_pw
         self._build()
 
     def _build(self):
@@ -2076,7 +2256,7 @@ class GroupDialog(W.BaseDialog):
         e = tk.Entry(f, textvariable=self.var_name, font=self.F["body"], bg=T.BG_INPUT,
                      fg=T.TEXT, relief="flat", bd=0, insertbackground=T.ACCENT)
         e.pack(fill="x", padx=2, pady=3)
-        e.focus_set()
+        self.ent_name = e
 
         tk.Label(body, text="分类图标", bg=T.BG_APP, fg=T.TEXT_SUB,
                  font=self.F["small_b"]).pack(anchor="w")
@@ -2103,10 +2283,46 @@ class GroupDialog(W.BaseDialog):
             self._swatches[c] = cv
         self._paint()
 
+        # ---- 打开密码（可选，不限长度和字符）
+        tk.Label(body, text="打开密码（可选）", bg=T.BG_APP, fg=T.TEXT_SUB,
+                 font=self.F["small_b"]).pack(anchor="w", pady=(16, 0))
+        pw_row = tk.Frame(body, bg=T.BG_APP)
+        pw_row.pack(fill="x", pady=(4, 8))
+        pf = tk.Frame(pw_row, bg=T.LINE_STRONG)
+        pf.pack(side="left", fill="x", expand=True)
+        self.ent_pw = tk.Entry(pf, textvariable=self.var_pw, show="●",
+                               font=self.F["body"], bg=T.BG_INPUT, fg=T.TEXT,
+                               relief="flat", bd=0, insertbackground=T.ACCENT)
+        self.ent_pw.pack(fill="x", padx=2, pady=3)
+        eye = tk.Label(pw_row, image=self.bank.get("eyes", 18), bg=T.BG_APP,
+                       cursor="hand2")
+        eye.pack(side="left", padx=(8, 0))
+        eye.bind("<Button-1>", lambda e: self._toggle_pw())
+
+        tk.Label(body, text="密码提示（忘记密码时回答问题找回，可加多条）",
+                 bg=T.BG_APP, fg=T.TEXT_SUB, font=self.F["small_b"]
+                 ).pack(anchor="w", pady=(8, 0))
+        self.hint_box = tk.Frame(body, bg=T.BG_APP)
+        self.hint_box.pack(fill="x", pady=(2, 0))
+        self._render_hint_rows()
+        W.RoundButton(body, text="＋ 添加提示", emoji_img=self.bank.get("plus", 16),
+                      variant="plain", width=126, height=30, bg=T.BG_APP,
+                      command=self._add_hint).pack(anchor="w", pady=(4, 6))
+
+        self.lbl_err = tk.Label(body, text="", bg=T.BG_APP, fg=T.DANGER_DK,
+                                font=self.F["tiny"], anchor="w", justify="left",
+                                wraplength=400)
+        self.lbl_err.pack(anchor="w")
+        tk.Label(body, text="密码留空 = 不加密；设了密码至少要有一条提示。"
+                            "输对密码后 24 小时内免输。",
+                 bg=T.BG_APP, fg=T.TEXT_SUB, font=self.F["tiny"],
+                 anchor="w", justify="left", wraplength=400).pack(anchor="w")
+
         self.add_footer_buttons(ok_text="保存", cancel_text="取消",
                                 ok_emoji=self.bank.get("check", 18),
                                 cancel_emoji=self.bank.get("cross", 18),
                                 on_ok=self._save)
+        (self.ent_pw if self._focus_pw else self.ent_name).focus_set()
 
     def _paint(self):
         c = self.prev
@@ -2127,6 +2343,55 @@ class GroupDialog(W.BaseDialog):
         self.color = col
         self._paint()
 
+    def _toggle_pw(self):
+        self._show_pw = not self._show_pw
+        self.ent_pw.configure(show="" if self._show_pw else "●")
+
+    def _render_hint_rows(self):
+        for w in self.hint_box.winfo_children():
+            w.destroy()
+        self._hint_entries = []
+        for i, (vq, va) in enumerate(self._hint_vars):
+            row = tk.Frame(self.hint_box, bg=T.BG_APP)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text="提示 %d" % (i + 1), bg=T.BG_APP,
+                     fg=T.TEXT_SUB, font=self.F["tiny"]).pack(
+                side="left", anchor="n", pady=(9, 0))
+            col = tk.Frame(row, bg=T.BG_APP)
+            col.pack(side="left", fill="x", expand=True, padx=(6, 4))
+            fq = tk.Frame(col, bg=T.LINE_STRONG)
+            fq.pack(fill="x")
+            eq = tk.Entry(fq, textvariable=vq, font=self.F["small"],
+                          bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
+                          insertbackground=T.ACCENT)
+            eq.pack(fill="x", padx=2, pady=2)
+            fa = tk.Frame(col, bg=T.LINE_STRONG)
+            fa.pack(fill="x", pady=(3, 0))
+            ea = tk.Entry(fa, textvariable=va, font=self.F["small"],
+                          bg=T.BG_INPUT, fg=T.TEXT, relief="flat", bd=0,
+                          insertbackground=T.ACCENT)
+            ea.pack(fill="x", padx=2, pady=2)
+            self._hint_entries.append(eq)
+            if len(self._hint_vars) > 1:
+                x = tk.Label(row, image=self.bank.get("cross", 16),
+                             bg=T.BG_APP, cursor="hand2")
+                x.pack(side="left", padx=(0, 2))
+                x.bind("<Button-1>", lambda e, idx=i: self._del_hint(idx))
+
+    def _add_hint(self):
+        self._hint_vars.append((tk.StringVar(), tk.StringVar()))
+        self._render_hint_rows()
+        try:
+            self._hint_entries[-1].focus_set()
+        except Exception:
+            pass
+
+    def _del_hint(self, idx):
+        if len(self._hint_vars) <= 1:
+            return
+        self._hint_vars.pop(idx)
+        self._render_hint_rows()
+
     def _pick(self):
         dlg = W.EmojiPickerDialog(self, self.bank, self.emoji_name)
         got = dlg.show()
@@ -2138,11 +2403,25 @@ class GroupDialog(W.BaseDialog):
         name = self.var_name.get().strip()
         if not name:
             name = "新分类"
+        pw = self.var_pw.get()
+        hints = [{"q": vq.get().strip(), "a": va.get().strip()}
+                 for vq, va in self._hint_vars]
+        hints = [h for h in hints if h["q"] or h["a"]]
+        if pw:
+            if not hints:
+                self.lbl_err.configure(
+                    text="设置了密码，至少要填一条密码提示（问题和答案）")
+                return
+            if any(not h["q"] or not h["a"] for h in hints):
+                self.lbl_err.configure(
+                    text="每条密码提示的问题和答案都要填完整")
+                return
         if self.is_new:
-            self.store.add_group(name, self.emoji_name, self.color)
+            self.store.add_group(name, self.emoji_name, self.color, pw, hints)
         else:
             self.store.update_group(self.group["id"], name=name,
                                     emoji=self.emoji_name, color=self.color)
+            self.store.set_group_password(self.group["id"], pw, hints)
         self._result = True
         self.destroy()
 
