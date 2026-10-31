@@ -120,7 +120,7 @@ def main():
 
         hd = M.GroupHintsDialog(root, bank, gd.hints)
         hd.update_idletasks()
-        check("密保默认三组问答", len(hd._vars) == 3)
+        check("密保默认一组问答", len(hd._vars) == 1)
         hd._save()
         check("密保全空时拒绝保存",
               hd.winfo_exists() and "至少" in hd.lbl_err.cget("text"))

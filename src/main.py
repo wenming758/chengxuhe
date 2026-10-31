@@ -1826,9 +1826,17 @@ class Launcher(object):
                 wscript = "wscript.exe"
             # 必须真的把这个助手跑起来：之前只写了脚本没启动，程序退出后
             # 什么都没发生，所以再次打开还是旧版本。
+            # 环境要洗干净：本进程是单文件 exe 解出来的子进程，带着
+            # _PYI_* / TCL_LIBRARY / TK_LIBRARY 这些指向自己临时目录的变量，
+            # 直接继承给 wscript 再继承给新 exe，新实例可能去已经删掉的
+            # _MEIxxxx 里找 python312.dll，报「Failed to load Python DLL」。
             import subprocess
+            junk = ("_PYI_", "_MEI", "MEIPASS", "PYTHONHOME", "PYTHONPATH",
+                    "TCL_LIBRARY", "TK_LIBRARY")
+            env = {k: v for k, v in os.environ.items()
+                   if not any(s in k.upper() for s in junk)}
             subprocess.Popen([wscript, "//B", "//Nologo", script],
-                             close_fds=True,
+                             close_fds=True, env=env,
                              creationflags=0x00000008 | 0x00000200)
         except Exception as e:
             if dlg.winfo_exists():
@@ -2336,19 +2344,19 @@ class GroupHintsDialog(W.BaseDialog):
     CN = "一二三四五六七八九十"
 
     def __init__(self, master, bank, hints=None):
-        W.BaseDialog.__init__(self, master, "设置密保",
-                              emoji_img=bank.get("lock", 28),
-                              width=470, height=470,
-                              subtitle="答对任意一组即可找回密码")
         self.bank = bank
         self.F = T.fonts()
         self.hints = []
         self._vars = [(tk.StringVar(value=h.get("q", "")),
                        tk.StringVar(value=h.get("a", "")))
                       for h in (hints or [])]
-        # 对齐参考样式：默认给三组问题位，留空的不保存
-        while len(self._vars) < 3:
+        # 默认只给一组问题 + 答案，不够用再点「添加问题」
+        if not self._vars:
             self._vars.append((tk.StringVar(), tk.StringVar()))
+        W.BaseDialog.__init__(self, master, "设置密保",
+                              emoji_img=bank.get("lock", 28),
+                              width=470, height=300,
+                              subtitle="答对任意一组即可找回密码")
         self._build()
 
     def _num(self, i):
@@ -2420,6 +2428,7 @@ class GroupHintsDialog(W.BaseDialog):
     def _add(self):
         self._vars.append((tk.StringVar(), tk.StringVar()))
         self._render_rows()
+        self._fit_rows()
         try:
             self._entries[-1].focus_set()
         except Exception:
@@ -2430,6 +2439,21 @@ class GroupHintsDialog(W.BaseDialog):
             return
         self._vars.pop(idx)
         self._render_rows()
+        self._fit_rows()
+
+    def _fit_rows(self):
+        """增删问题后窗口高度跟着内容走，位置不动，免得按钮跑出屏幕。"""
+        try:
+            self.update_idletasks()
+            h = self.winfo_reqheight()
+            l, t, r, b = W.BaseDialog._work_area()
+            if b > t:
+                h = min(h, b - t - 40)
+            h = max(h, self._dh)
+            self.geometry("%dx%d%+d%+d" % (self._dw, h,
+                                           self.winfo_x(), self.winfo_y()))
+        except Exception:
+            pass
 
     def _save(self):
         rows = [{"q": vq.get().strip(), "a": va.get().strip()}

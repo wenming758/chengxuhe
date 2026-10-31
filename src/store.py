@@ -15,7 +15,7 @@ import pngutil
 
 APP_TITLE = "程序收纳盒"
 VERSION = "1.0.0"          # 内部版本号（勿随意改动）
-APP_VERSION = "v0.1.8"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
+APP_VERSION = "v0.1.9"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
 AUTHOR = "wenming758"      # 软件作者
 
 # 在线升级（优先 Gitee，仓库不可达时退回 GitHub）

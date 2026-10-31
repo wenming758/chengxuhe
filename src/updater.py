@@ -190,6 +190,12 @@ def make_updater_script(target_exe, new_exe):
     用 VBScript 而不是 bat：脚本以 UTF-16LE 保存，中文/空格路径不会被
     控制台代码页搞乱，也不会闪黑框。循环重试是必要的 —— 旧 exe 还占着
     文件时复制会失败，进程退出后才能写入。
+
+    重启前必须等旧实例**整个进程组**退干净：单文件 exe 的临时目录叫
+    _MEI<父进程PID>，覆盖成功只代表引导器退了，界面进程可能还在收尾；
+    这时立刻拉起新 exe，新引导器可能拿到同一个 PID 撞上还没删掉的旧目录，
+    表现就是「Failed to load Python DLL ...python312.dll 找不到指定的模块」，
+    得手动再开一次才正常。
     """
     d = os.path.dirname(target_exe) or "."
     script = os.path.join(d, "update_helper.vbs")
@@ -203,6 +209,8 @@ def make_updater_script(target_exe, new_exe):
         'Set sh = CreateObject("WScript.Shell")\r\n'
         'newFile = %s\r\n' % vb(new_exe) +
         'tgt = %s\r\n' % vb(target_exe) +
+        'exeName = LCase(fso.GetFileName(tgt))\r\n'
+        'tgtL = LCase(tgt)\r\n'
         'ok = False\r\n'
         'For i = 1 To 120\r\n'
         '  On Error Resume Next\r\n'
@@ -228,6 +236,23 @@ def make_updater_script(target_exe, new_exe):
         '  lg.Close\r\n'
         '  On Error GoTo 0\r\n'
         'End If\r\n'
+        # 轮询进程表：同名且路径一致的那个进程还在，就继续等（最多 10 秒）。
+        # 用 Win32_Process 全量取回再在脚本里比对，避免把路径拼进 WQL。
+        'Set svc = GetObject("winmgmts:\\\\.\\root\\cimv2")\r\n'
+        'For j = 1 To 20\r\n'
+        '  busy = False\r\n'
+        '  On Error Resume Next\r\n'
+        '  Set col = svc.ExecQuery("Select * from Win32_Process")\r\n'
+        '  For Each pr In col\r\n'
+        '    If LCase(pr.Name & "") = exeName Then\r\n'
+        '      If LCase(pr.ExecutablePath & "") = tgtL Then busy = True\r\n'
+        '    End If\r\n'
+        '  Next\r\n'
+        '  On Error GoTo 0\r\n'
+        '  If Not busy Then Exit For\r\n'
+        '  WScript.Sleep 500\r\n'
+        'Next\r\n'
+        'WScript.Sleep 1200\r\n'
         # 升级完一定要把程序重新开起来。用 Chr(34) 拼引号：直接写四层
         # 引号在带空格 / 中文的路径上容易被 Run 解析错，导致「升级后没反应」。
         'On Error Resume Next\r\n'
