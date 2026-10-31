@@ -183,27 +183,53 @@ def download_file(dl_url, dest_path, on_progress=None):
 download_exe = download_file
 
 
-def make_updater_bat(target_exe, new_exe):
-    """写一个小 bat：等本程序退出（源文件解锁）后，把 new_exe 覆盖到
-    target_exe，再启动新的 exe。返回 bat 路径。
+def make_updater_script(target_exe, new_exe):
+    """写一个 VBS：等本程序退出（源文件解锁）后，把 new_exe 覆盖到
+    target_exe，再启动新的 exe。返回脚本路径。
 
-    用 move /y 轮询方式：文件被占用时 move 失败、源还在，就继续等；
-    一旦源解锁 move 成功，源消失，循环结束并启动新程序。这样无需按中文
-    进程名匹配，中文路径用引号包住即可，没有编码坑。
+    用 VBScript 而不是 bat：脚本以 UTF-16LE 保存，中文/空格路径不会被
+    控制台代码页搞乱，也不会闪黑框。循环重试是必要的 —— 旧 exe 还占着
+    文件时复制会失败，进程退出后才能写入。
     """
     d = os.path.dirname(target_exe) or "."
-    bat = os.path.join(d, "update_helper.bat")
+    script = os.path.join(d, "update_helper.vbs")
+    log = os.path.join(d, "update_helper.log")
+
+    def vb(s):
+        return '"%s"' % s.replace('"', '""')
+
     content = (
-        "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
-        'set "NEW=%s"\r\n' % new_exe +
-        'set "TGT=%s"\r\n' % target_exe +
-        ":loop\r\n"
-        "timeout /t 1 /nobreak >nul\r\n"
-        'move /y "%NEW%" "%TGT%" >nul 2>&1\r\n'
-        'if exist "%NEW%" goto loop\r\n'
-        'start "" "%TGT%"\r\n'
+        'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+        'Set sh = CreateObject("WScript.Shell")\r\n'
+        'newFile = %s\r\n' % vb(new_exe) +
+        'tgt = %s\r\n' % vb(target_exe) +
+        'ok = False\r\n'
+        'For i = 1 To 120\r\n'
+        '  On Error Resume Next\r\n'
+        '  fso.CopyFile newFile, tgt, True\r\n'
+        '  If Err.Number = 0 Then\r\n'
+        '    ok = True\r\n'
+        '    Err.Clear\r\n'
+        '    Exit For\r\n'
+        '  End If\r\n'
+        '  Err.Clear\r\n'
+        '  On Error GoTo 0\r\n'
+        '  WScript.Sleep 1000\r\n'
+        'Next\r\n'
+        'On Error GoTo 0\r\n'
+        'If ok Then\r\n'
+        '  On Error Resume Next\r\n'
+        '  fso.DeleteFile newFile, True\r\n'
+        '  On Error GoTo 0\r\n'
+        'Else\r\n'
+        '  On Error Resume Next\r\n'
+        '  Set lg = fso.OpenTextFile(%s, 8, True)\r\n' % vb(log) +
+        '  lg.WriteLine Now & " 更新失败：无法覆盖 " & tgt\r\n'
+        '  lg.Close\r\n'
+        '  On Error GoTo 0\r\n'
+        'End If\r\n'
+        'sh.Run """" & tgt & """", 1, False\r\n'
     )
-    with open(bat, "w", encoding="utf-8") as f:
+    with open(script, "w", encoding="utf-16") as f:
         f.write(content)
-    return bat
+    return script

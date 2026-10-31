@@ -248,13 +248,18 @@ class ScrollArea(tk.Frame):
 
     def _resize_inner(self):
         cw = self.canvas.winfo_width()
-        iw = self.inner.winfo_reqwidth()
         l, t, r, b = self.padding
-        width = max(cw, iw + l + r)
+        # 右侧留 10px 给自绘滚动条：内嵌 Frame 是独立的子窗口，
+        # 会把画布上画的滚动条整个盖住，不留缝就永远看不见。
+        width = max(1, cw - l - 10)
         if width != self._inner_w:
             self._inner_w = width
             self.canvas.itemconfigure(self._win, width=width)
         self.canvas.coords(self._win, l, t)
+        # 不显式设置 scrollregion 时，Tk 不会把内嵌窗口算进可滚动范围，
+        # yview 永远是 (0, 1)，滚轮和滚动条都拖不动。
+        self.canvas.configure(
+            scrollregion=(0, 0, cw, self.inner.winfo_reqheight() + t + b))
 
     def _on_wheel(self, event):
         if self.canvas.yview() == (0.0, 1.0):
@@ -273,7 +278,7 @@ class ScrollArea(tk.Frame):
         top, bottom = self.canvas.yview()
         bar_h = max(36, int(ch * (bottom - top)))
         y0 = int(top * ch)
-        x1 = cw - 7
+        x1 = cw - 2
         x0 = x1 - 5
         if self._sb is None:
             self._sb = T.rrect(self.canvas, x0, y0, x1, y0 + bar_h, 3,
@@ -537,7 +542,7 @@ class GroupRow(tk.Canvas):
     DRAG_THRESHOLD = 5  # 移动超过 5px 才算拖拽，避免误吞单击
 
     def __init__(self, master, gid, name, emoji_img, count, selected, on_click,
-                 on_menu, bg=None, width=196, draggable=False, on_drop=None,
+                 on_menu, bg=None, width=186, draggable=False, on_drop=None,
                  locked_img=None):
         self.bg = bg or T.BG_SIDE
         tk.Canvas.__init__(self, master, width=width, height=self.H, bg=self.bg,

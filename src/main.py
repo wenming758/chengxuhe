@@ -110,6 +110,7 @@ class Launcher(object):
         self._empty_frame = None
         self._empty_showing = False
         self._laid_n = -1
+        self._visible_n = 0
         self._sort = self.store.settings.get("sort", "manual")
         self._hit = None
         # 缩放/最大化期间合并重绘请求，防止连续 Configure 把界面拖死
@@ -700,18 +701,24 @@ class Launcher(object):
             lbl = tk.Label(top, image=self.bank.get("folder2", 18), bg=T.BG_SIDE)
             lbl.pack(side="left", pady=16)
 
-        self.group_box = tk.Frame(side, bg=T.BG_SIDE)
-        self.group_box.pack(fill="x")
-
-        tk.Frame(side, bg=T.LINE, height=1).pack(fill="x", padx=16, pady=(10, 0))
-
         bottom = tk.Frame(side, bg=T.BG_SIDE)
         bottom.pack(side="bottom", fill="x", pady=14)
+        # 先把底部按钮区占住，再把分类列表放进可滚动区域：
+        # 否则分类一多，group_box 会把 212px 侧栏撑满，
+        # 「新建分类」被挤到窗口外，只有最大化后才看得见。
         self.btn_new_group = W.RoundButton(
             bottom, text="新建分类", emoji_img=self.bank.get("new", 18),
             variant="plain", width=176, height=38, bg=T.BG_SIDE,
             command=self.dialog_add_group)
         self.btn_new_group.pack(padx=18, pady=(0, 10))
+
+        tk.Frame(side, bg=T.LINE, height=1).pack(side="bottom", fill="x",
+                                                 padx=16, pady=(0, 6))
+
+        self.group_scroll = W.ScrollArea(side, bg=T.BG_SIDE,
+                                         padding=(0, 2, 0, 2))
+        self.group_scroll.pack(side="top", fill="both", expand=True)
+        self.group_box = self.group_scroll.inner
 
         tip = tk.Frame(bottom, bg=T.BG_TAG)
         tip.pack(fill="x", padx=14)
@@ -743,6 +750,7 @@ class Launcher(object):
                              self.cur_group == gid, self._select_group, None,
                              bg=T.BG_SIDE, draggable=False)
             row.pack(fill="x", padx=8, pady=1)
+            self.group_scroll.attach(row)
             self._group_rows[gid] = row
         if self.store.groups:
             tk.Frame(self.group_box, bg=T.LINE, height=1).pack(fill="x", padx=20, pady=6)
@@ -758,6 +766,7 @@ class Launcher(object):
                              locked_img=(self.bank.get("lock", 16)
                                          if self.store.group_locked(gid) else None))
             row.pack(fill="x", padx=8, pady=1)
+            self.group_scroll.attach(row)
             self._group_rows[gid] = row
         # 拖拽时的插入指示条（默认隐藏）
         self._drop_bar = tk.Frame(self.group_box, height=2, bg=T.ACCENT_DK)
@@ -1020,6 +1029,7 @@ class Launcher(object):
 
         n_have = len(self.cards)
         n_need = len(items)
+        self._visible_n = n_need
         for idx, app in enumerate(items):
             img = self.icon_bank.get(app.get("icon"), 48)
             emo = None
@@ -1069,6 +1079,7 @@ class Launcher(object):
         # 布局缓存作废，保证下次显示时一定会重新 grid
         self._laid_out = False
         self._laid_n = -1
+        self._visible_n = 0
         self._last_cols = -1
 
     def _build_empty(self):
@@ -1125,13 +1136,18 @@ class Launcher(object):
         # 空态显示期间（尤其是窗口最大化触发 <Configure>）绝不能去 grid。
         if getattr(self, "_empty_showing", False):
             return
+        # 始终只排当前分类可见的那几张：self.cards 是复用池，池里还留着
+        # 其它分类的卡片（已被 grid_forget）。若这里按 len(self.cards) 排，
+        # 最大化触发重排时会把它们全部重新 grid 出来 —— 分类里突然冒出
+        # 全部程序，点一下别的分类才恢复，就是这个原因。
+        n = getattr(self, "_visible_n", 0) if visible is None else visible
+        self._visible_n = n
         # 按「卡片区实际能放下几列」来算，别再强制至少 7 列 ——
         # 小屏（比如 1200x720）上强制 7 列会让第 7 列被裁掉，
         # 卡片既点不到，多出来的宽度还会让每次重排更慢。
         step = W.AppCard.W + 8
         avail = max(step, self.area.canvas.winfo_width() - 40)
         cols = max(1, min(self.MAX_COLS, int(avail // step)))
-        n = len(self.cards) if visible is None else visible
         if cols == self._last_cols and getattr(self, "_laid_out", False) \
                 and n == getattr(self, "_laid_n", -1):
             return
@@ -1801,7 +1817,19 @@ class Launcher(object):
 
     def _finish_update(self, dlg, new_exe, real):
         try:
-            updater.make_updater_bat(real, new_exe)
+            if not os.path.isfile(new_exe) or os.path.getsize(new_exe) < 1024 * 1024:
+                raise RuntimeError("更新文件不完整")
+            script = updater.make_updater_script(real, new_exe)
+            wscript = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                                   "System32", "wscript.exe")
+            if not os.path.isfile(wscript):
+                wscript = "wscript.exe"
+            # 必须真的把这个助手跑起来：之前只写了脚本没启动，程序退出后
+            # 什么都没发生，所以再次打开还是旧版本。
+            import subprocess
+            subprocess.Popen([wscript, "//B", "//Nologo", script],
+                             close_fds=True,
+                             creationflags=0x00000008 | 0x00000200)
         except Exception as e:
             if dlg.winfo_exists():
                 dlg.destroy()
@@ -1809,7 +1837,7 @@ class Launcher(object):
             return
         if dlg.winfo_exists():
             dlg.destroy()
-        # 退出主循环，把覆盖 + 重启交给 update_helper.bat
+        # 退出主循环，把覆盖 + 重启交给 update_helper.vbs
         self._quit()
 
     # ================================================== 拖拽
@@ -2591,9 +2619,14 @@ class GroupDialog(W.BaseDialog):
         pw = self.var_pw.get()
         hints = [dict(h) for h in self.hints if h.get("q") and h.get("a")]
         if pw and not hints:
-            self.lbl_err.configure(
-                text="设置了密码，请先点「设置密保问题…」填写密保问答")
-            return
+            # 有密码就至少要有「一组」密保问答；直接弹出密保窗口，
+            # 让用户当场填好，而不是只丢一句错误提示。
+            self._edit_hints()
+            hints = [dict(h) for h in self.hints if h.get("q") and h.get("a")]
+            if not hints:
+                self.lbl_err.configure(
+                    text="设置了密码，就必须至少填写一组密保问题和答案")
+                return
         if self.is_new:
             self.store.add_group(name, self.emoji_name, self.color, pw, hints)
         else:

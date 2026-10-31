@@ -98,9 +98,25 @@ def main():
         gd.update_idletasks()
         gd.var_name.set("私密2")
         gd.var_pw.set("abc")
+        gd._edit_hints = lambda: None      # 不弹模态窗，单独验证拒绝逻辑
         gd._save()
         check("有密码缺密保时拒绝保存",
               gd.winfo_exists() and "密保" in gd.lbl_err.cget("text"))
+
+        gd2 = M.GroupDialog(root, bank, st, None)
+        gd2.update_idletasks()
+        gd2.var_name.set("私密3")
+        gd2.var_pw.set("xyz")
+
+        def fake_hints():
+            gd2.hints = [{"q": "自动补填？", "a": "是"}]
+            gd2._paint_hints()
+        gd2._edit_hints = fake_hints
+        gd2._save()
+        g3 = [x for x in st.groups if x["name"] == "私密3"]
+        check("密码缺密保时自动弹窗补填后可保存",
+              not gd2.winfo_exists() and len(g3) == 1
+              and len(g3[0]["pw_hints"]) == 1)
 
         hd = M.GroupHintsDialog(root, bank, gd.hints)
         hd.update_idletasks()
