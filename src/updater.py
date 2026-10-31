@@ -228,7 +228,12 @@ def make_updater_script(target_exe, new_exe):
         '  lg.Close\r\n'
         '  On Error GoTo 0\r\n'
         'End If\r\n'
-        'sh.Run """" & tgt & """", 1, False\r\n'
+        # 升级完一定要把程序重新开起来。用 Chr(34) 拼引号：直接写四层
+        # 引号在带空格 / 中文的路径上容易被 Run 解析错，导致「升级后没反应」。
+        'On Error Resume Next\r\n'
+        'sh.CurrentDirectory = fso.GetParentFolderName(tgt)\r\n'
+        'On Error GoTo 0\r\n'
+        'sh.Run Chr(34) & tgt & Chr(34), 1, False\r\n'
     )
     with open(script, "w", encoding="utf-16") as f:
         f.write(content)
