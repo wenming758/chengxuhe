@@ -15,13 +15,13 @@ import pngutil
 
 APP_TITLE = "程序收纳盒"
 VERSION = "1.0.0"          # 内部版本号（勿随意改动）
-APP_VERSION = "v0.1.3"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
+APP_VERSION = "v0.1.4"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
 AUTHOR = "wenming758"      # 软件作者
 
-# 在线升级（优先 GitHub，仓库不可达时退回 Gitee 旧发布页）
+# 在线升级（优先 Gitee，仓库不可达时退回 GitHub）
 UPDATE_APIS = [
-    "https://api.github.com/repos/wenming758/chengxuhe",
     "https://gitee.com/api/v5/repos/wenming760/chengxuhe",
+    "https://api.github.com/repos/wenming758/chengxuhe",
 ]
 UPDATE_API = UPDATE_APIS[0]
 
@@ -154,6 +154,8 @@ class Store(object):
             "view": st.get("view", "grid"),
             # 记住上次退出时所在的分类，下次启动直接进入该分类
             "last_group": st.get("last_group", ""),
+            # 上次自动检查更新的时间戳（秒），避免每次启动都请求
+            "update_checked_at": st.get("update_checked_at", 0),
         }
         # 兜底修补字段
         for it in self.items:

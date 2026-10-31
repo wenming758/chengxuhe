@@ -147,7 +147,7 @@ def check_for_update(apis, local_version):
     patch = _pick_patch(assets, local_version)
     if patch and parse_version(patch.get("to")) == parse_version(tag):
         info["patch_url"] = patch["url"]
-        info["patch_size"] = patch["size"]
+        info["patch_size"] = patch["size"] or probe_size(patch["url"])
 
     # 按版本号大小比对：远程更大才算有升级
     try:

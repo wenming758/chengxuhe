@@ -334,6 +334,47 @@ class Launcher(object):
             self.root.after(1000, self._refresh_icons_once)
         except Exception:
             pass
+        try:
+            self.root.after(4000, self._auto_check_update)
+        except Exception:
+            pass
+
+    def _auto_check_update(self):
+        """启动后后台静默检查更新，有新版才弹提示。"""
+        if getattr(self, "_update_checking", False):
+            return
+        try:
+            last = float(self.store.settings.get("update_checked_at") or 0)
+        except Exception:
+            last = 0
+        if time.time() - last < 6 * 3600:
+            return
+        self._update_checking = True
+
+        def work():
+            avail, info = False, None
+            try:
+                avail, info = updater.check_for_update(S.UPDATE_APIS,
+                                                       S.APP_VERSION)
+            except Exception:
+                pass
+
+            def done():
+                self._update_checking = False
+                if getattr(self, "_closing", False):
+                    return
+                if info and not info.get("error"):
+                    self.store.settings["update_checked_at"] = time.time()
+                    self.store.save()
+                if avail and info:
+                    self._on_update_checked(True, info)
+
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _refresh_icons_once(self):
         """旧版缓存里的图标只有左上角一小块，启动后后台重抓一次。"""
