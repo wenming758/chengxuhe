@@ -14,6 +14,11 @@
 - **更新源切换为 Gitee。** 优先查询 Gitee 发布页，不可达时自动回退 GitHub Releases。
   两个平台都会同步发布 exe 与增量补丁。
 
+## 下载
+
+- Gitee：<https://gitee.com/wenming760/chengxuhe/releases/latest>
+- GitHub：<https://github.com/wenming758/chengxuhe/releases/latest>
+
 ## 界面预览
 
 ![主界面](docs/screenshot-main.png)
