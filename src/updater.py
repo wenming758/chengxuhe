@@ -1,0 +1,167 @@
+# -*- coding: utf-8 -*-
+"""
+在线升级（Gitee 仓库发布页）
+============================
+· 升级源：wenming760/chengxuhe 的 Gitee Release
+· 判定方式：拿最新 Release 的 tag_name（如 v0.1.2）和本地版本号比大小，
+  远程版本号更大 => 有新版本可升。
+· 下载：取 Release 里名字以 .exe 结尾的资产，直接下载到临时文件，
+  再写一个小 bat 等本程序退出后把新 exe 覆盖到源文件并重启。
+
+说明：升级源是公开的 Git 发布页，无需鉴权；这里只做「读最新版本 + 下 exe」。
+"""
+import json
+import os
+import re
+import ssl
+import sys
+import time
+import urllib.request
+import urllib.error
+
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+
+# 单文件模式（PyInstaller onefile）下，sys.executable 指向临时解包目录里的
+# 副本，不是用户真正运行的那个 exe；启动时的 argv[0] 才是磁盘上的真身。
+def real_exe_path():
+    return os.path.abspath(sys.argv[0])
+
+
+def _ctx():
+    c = ssl.create_default_context()
+    c.check_hostname = False
+    c.verify_mode = ssl.CERT_NONE
+    return c
+
+
+def parse_version(v):
+    """'v0.1.2' / '0.1.2' -> (0, 1, 2)，用于按大小比对。"""
+    v = (v or "").strip().lstrip("vVuU")
+    parts = re.findall(r"\d+", v)
+    return tuple(int(p) for p in parts) or (0,)
+
+
+def human_size(n):
+    try:
+        n = int(n)
+    except Exception:
+        return "?"
+    if n >= 1024 * 1024:
+        return "%.1f MB" % (n / 1024.0 / 1024.0)
+    if n >= 1024:
+        return "%.1f KB" % (n / 1024.0)
+    return "%d B" % n
+
+
+def probe_size(url):
+    """探测下载直链的真实大小（字节）。HEAD 不行就退回 GET 只读响应头。
+
+    只在确认框里用，省得显示「0 B」。读头不读体，几乎不耗流量。
+    """
+    hdrs = {"User-Agent": _UA, "Referer": "https://gitee.com/"}
+    # 先试 HEAD（不传 body），多数 CDN 会回 Content-Length
+    for method in ("HEAD", "GET"):
+        try:
+            req = urllib.request.Request(url, method=method, headers=hdrs)
+            r = urllib.request.urlopen(req, context=_ctx(), timeout=20)
+            try:
+                cl = int(r.headers.get("Content-Length", "0") or 0)
+            finally:
+                r.close()
+            if cl:
+                return cl
+        except Exception:
+            continue
+    return 0
+
+
+def check_for_update(api_url, local_version):
+    """返回 (available: bool, info: dict)。
+
+    info 字段：version（远程 tag）、name（exe 文件名）、size、url（下载直链）、
+    error（出错信息，空串表示正常）。
+    """
+    info = {"version": "", "name": "", "size": 0, "url": "", "error": ""}
+    try:
+        req = urllib.request.Request(api_url + "/releases/latest",
+                                     headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, context=_ctx(), timeout=30) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        info["error"] = "检查更新失败：服务器返回 %d" % e.code
+        return False, info
+    except Exception as e:
+        info["error"] = "检查更新失败：%s" % e
+        return False, info
+
+    tag = (data.get("tag_name") or "").strip()
+    assets = data.get("assets") or []
+    exe = [a for a in assets if str(a.get("name", "")).lower().endswith(".exe")]
+    if not exe:
+        info["error"] = "最新发布里没有找到 exe 安装包"
+        return False, info
+    info["version"] = tag
+    info["name"] = exe[0].get("name", "")
+    info["size"] = exe[0].get("size", 0) or 0
+    info["url"] = exe[0].get("browser_download_url", "")
+    # Gitee 的 Release 资产经常不返回 size 字段（为 None），
+    # 这里用下载直链补探一次真实的 Content-Length，让确认框显示准确体积。
+    if not info["size"] and info["url"]:
+        info["size"] = probe_size(info["url"])
+
+    # 按版本号大小比对：远程更大才算有升级
+    try:
+        available = parse_version(tag) > parse_version(local_version)
+    except Exception:
+        available = False
+    return available, info
+
+
+def download_exe(dl_url, dest_path, on_progress=None):
+    """下载 exe 到 dest_path（建议用 .new 临时名），返回本地路径。
+
+    on_progress(got, total) 在下载过程中回调，total 可能为 0（未知大小）。
+    """
+    req = urllib.request.Request(dl_url,
+                                 headers={"User-Agent": _UA,
+                                          "Referer": "https://gitee.com/"})
+    with urllib.request.urlopen(req, context=_ctx(), timeout=300) as r:
+        total = int(r.headers.get("Content-Length", "0") or 0)
+        with open(dest_path, "wb") as f:
+            got = 0
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if on_progress:
+                    on_progress(got, total)
+    return dest_path
+
+
+def make_updater_bat(target_exe, new_exe):
+    """写一个小 bat：等本程序退出（源文件解锁）后，把 new_exe 覆盖到
+    target_exe，再启动新的 exe。返回 bat 路径。
+
+    用 move /y 轮询方式：文件被占用时 move 失败、源还在，就继续等；
+    一旦源解锁 move 成功，源消失，循环结束并启动新程序。这样无需按中文
+    进程名匹配，中文路径用引号包住即可，没有编码坑。
+    """
+    d = os.path.dirname(target_exe) or "."
+    bat = os.path.join(d, "update_helper.bat")
+    content = (
+        "@echo off\r\n"
+        "chcp 65001 >nul\r\n"
+        'set "NEW=%s"\r\n' % new_exe +
+        'set "TGT=%s"\r\n' % target_exe +
+        ":loop\r\n"
+        "timeout /t 1 /nobreak >nul\r\n"
+        'move /y "%NEW%" "%TGT%" >nul 2>&1\r\n'
+        'if exist "%NEW%" goto loop\r\n'
+        'start "" "%TGT%"\r\n'
+    )
+    with open(bat, "w", encoding="utf-8") as f:
+        f.write(content)
+    return bat

@@ -1,0 +1,17 @@
+# 用户数据 / 本机产物（不随代码发布）
+apps_data.json
+apps_data.json.*
+icons/
+修复日志.txt
+修复.txt
+
+# 构建产物
+build/
+dist/
+__pycache__/
+*.pyc
+
+# 临时文件
+_shot*.png
+*.bad
+*.tmp
