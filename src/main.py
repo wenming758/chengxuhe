@@ -22,6 +22,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import assets as A          # noqa: E402
+import delta                # noqa: E402
 import iconutil             # noqa: E402
 import linkfix              # noqa: E402
 import singleinst           # noqa: E402
@@ -327,6 +328,53 @@ class Launcher(object):
         self._force_repaint()
         try:
             self.root.after(150, self._focus_search)
+        except Exception:
+            pass
+        try:
+            self.root.after(1000, self._refresh_icons_once)
+        except Exception:
+            pass
+
+    def _refresh_icons_once(self):
+        """旧版缓存里的图标只有左上角一小块，启动后后台重抓一次。"""
+        todo = [it for it in list(self.store.items)
+                if it.get("icon")
+                and int(it.get("iconv", 0) or 0) < S.ICON_FORMAT]
+        if not todo:
+            return
+
+        def work():
+            results = {}
+            for it in todo:
+                try:
+                    got = iconutil.extract_icon(it.get("path", ""))
+                except Exception:
+                    got = None
+                if got:
+                    results[it["id"]] = got
+            try:
+                self.root.after(0, lambda: self._apply_icon_refresh(todo, results))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_icon_refresh(self, todo, results):
+        if getattr(self, "_closing", False):
+            return
+        try:
+            for it in todo:
+                got = results.get(it["id"])
+                if got:
+                    fn = self.store.cache_icon(got)
+                    if not fn:
+                        continue    # 编码失败：保留旧图标，下次启动再试
+                    it["icon"] = fn
+                # 抓不到也记下版本，避免每次启动都白试一遍
+                it["iconv"] = S.ICON_FORMAT
+            self.store.save()
+            self.icon_bank.clear()
+            self.refresh()
         except Exception:
             pass
 
@@ -1185,7 +1233,11 @@ class Launcher(object):
                             self.bank.get("warn", 18))
             return
         fn = self.store.cache_icon(got)
-        self.store.update_app(app["id"], icon=fn)
+        if not fn:
+            self.toast.show("图标缓存失败，已保留原图标",
+                            self.bank.get("warn", 18))
+            return
+        self.store.update_app(app["id"], icon=fn, iconv=S.ICON_FORMAT)
         self.icon_bank.clear()
         self.refresh()
         self.toast.show("图标已更新", self.bank.get("check", 18))
@@ -1416,6 +1468,7 @@ class Launcher(object):
             if got:
                 it["icon"] = self.store.cache_icon(got)
                 n += 1
+            it["iconv"] = S.ICON_FORMAT
         self.store.save()
         self.icon_bank.clear()
         self.refresh()
@@ -1450,12 +1503,13 @@ class Launcher(object):
 
     # ================================================== 在线升级（Gitee 发布页）
     def check_update(self):
-        """手动检查更新：后台线程拉 Gitee 最新 Release，按版本号比大小。"""
+        """手动检查更新：后台线程拉最新 Release，按版本号比大小。"""
         self.toast.show("正在检查更新…", self.bank.get("cloud", 18))
 
         def work():
             try:
-                avail, info = updater.check_for_update(S.UPDATE_API, S.APP_VERSION)
+                avail, info = updater.check_for_update(S.UPDATE_APIS,
+                                                       S.APP_VERSION)
             except Exception as e:
                 avail, info = False, {"error": "检查更新失败：%s" % e}
             self.root.after(0, lambda: self._on_update_checked(avail, info))
@@ -1473,17 +1527,23 @@ class Launcher(object):
         # 有新版：弹确认框
         dlg = W.BaseDialog(self.root, "发现新版本",
                            emoji_img=self.bank.get("cloud", 28),
-                           width=440, height=250,
+                           width=460, height=280,
                            subtitle="最新版本 %s" % info.get("version", ""))
         wrap = tk.Frame(dlg.body, bg=T.BG_APP)
         wrap.pack(fill="both", expand=True, padx=26, pady=18)
-        for t in (
+        patch_size = info.get("patch_size", 0)
+        lines = [
             "当前版本：%s" % S.APP_VERSION,
             "最新版本：%s" % info.get("version", ""),
-            "安装包大小：%s" % updater.human_size(info.get("size", 0)),
-            "",
-            "是否立即下载并更新到最新版？",
-        ):
+        ]
+        if info.get("patch_url"):
+            lines.append("增量更新包：%s（只下载变化的部分）"
+                         % updater.human_size(patch_size))
+            lines.append("完整安装包：%s" % updater.human_size(info.get("size", 0)))
+        else:
+            lines.append("安装包大小：%s" % updater.human_size(info.get("size", 0)))
+        lines += ["", "是否立即下载并更新到最新版？"]
+        for t in lines:
             tk.Label(wrap, text=t, bg=T.BG_APP, fg=T.TEXT_SUB,
                      font=self.F["small"], anchor="w").pack(anchor="w", pady=2)
         dlg.add_footer_buttons(ok_text="立即升级", cancel_text="稍后再说",
@@ -1491,62 +1551,108 @@ class Launcher(object):
                                cancel_emoji=self.bank.get("cross", 18))
         dlg.show()
         if dlg._result:
-            self.do_update(info.get("url", ""))
+            self.do_update(info)
 
-    def do_update(self, url):
-        """下载新 exe 到 .new，写 update_helper.bat，再退出让 bat 接管覆盖重启。"""
-        if not url:
+    def do_update(self, info):
+        """优先下载增量补丁，合并成本地新 exe；没有补丁则回退整包下载。"""
+        url = info.get("url", "")
+        patch_url = info.get("patch_url", "")
+        if not url and not patch_url:
             self.toast.show("没有可用的下载地址", self.bank.get("cross", 18))
             return
         real = updater.real_exe_path()
         d = os.path.dirname(real) or "."
         new_exe = os.path.join(d, "程序收纳盒.new")
+        patch_file = os.path.join(d, "程序收纳盒.patch")
 
         # 进度窗口（非阻塞：不调用 show() 的 wait_window）
         dlg = W.BaseDialog(self.root, "正在升级",
                            emoji_img=self.bank.get("cloud", 28),
-                           width=420, height=170,
+                           width=440, height=170,
                            subtitle="下载更新中…")
         wrap = tk.Frame(dlg.body, bg=T.BG_APP)
         wrap.pack(fill="both", expand=True, padx=26, pady=18)
         lab = tk.Label(wrap, text="准备下载…", bg=T.BG_APP, fg=T.TEXT_SUB,
                        font=self.F["small"], anchor="w")
         lab.pack(anchor="w", pady=(0, 10))
-        pb = ttk.Progressbar(wrap, orient="horizontal", length=340, mode="determinate")
+        pb = ttk.Progressbar(wrap, orient="horizontal", length=360, mode="determinate")
         pb.pack(fill="x")
         dlg.update_idletasks()
         w = max(dlg._dw, dlg.winfo_reqwidth())
         h = max(dlg._dh, dlg.winfo_reqheight())
         dlg.geometry("%dx%d" % (w, h))
         dlg._center(self.root, w, h)
-        # 下载期间禁止关闭，避免半截升级
+        # 下载/合并期间禁止关闭，避免半截升级
         dlg.protocol("WM_DELETE_WINDOW", lambda: None)
         dlg.bind("<Escape>", lambda e: None)
         dlg.deiconify(); dlg.lift(); dlg.grab_set(); dlg.focus_force()
 
         def work():
-            try:
-                def prog(got, total):
+            if int(pb["value"]) and pb["mode"] == "indeterminate":
+                pb.stop()
+            used_patch = False
+            if patch_url:
+                try:
+                    lab2 = "下载增量补丁…"
+
+                    def prog_patch(got, total):
+                        self.root.after(0, lambda: self._update_progress(
+                            lab, pb, got, total, lab2))
+
+                    updater.download_file(patch_url, patch_file,
+                                          on_progress=prog_patch)
                     self.root.after(0, lambda: self._update_progress(
-                        lab, pb, got, total))
-                updater.download_exe(url, new_exe, on_progress=prog)
-                self.root.after(0, lambda: self._finish_update(dlg, new_exe, real))
-            except Exception as e:
-                self.root.after(0, lambda: self._update_error(dlg, str(e)))
+                        lab, pb, 0, 0, "正在合并更新…"))
+                    delta.apply_patch(
+                        real, patch_file, new_exe,
+                        on_progress=lambda got, total: self.root.after(
+                            0, lambda: self._update_progress(
+                                lab, pb, got, total, "正在合并更新…")))
+                    used_patch = True
+                except Exception:
+                    used_patch = False
+                    try:
+                        os.remove(patch_file)
+                    except Exception:
+                        pass
+            if not used_patch:
+                if not url:
+                    self.root.after(0, lambda: self._update_error(
+                        dlg, "增量合并失败，且没有可用的完整安装包"))
+                    return
+                self.root.after(0, lambda: self._update_progress(
+                    lab, pb, 0, 0, "下载完整安装包…"))
+
+                def prog_full(got, total):
+                    self.root.after(0, lambda: self._update_progress(
+                        lab, pb, got, total, "下载完整安装包…"))
+
+                try:
+                    updater.download_file(url, new_exe, on_progress=prog_full)
+                except Exception as e:
+                    self.root.after(0, lambda: self._update_error(dlg, str(e)))
+                    return
+            try:
+                os.remove(patch_file)
+            except Exception:
+                pass
+            self.root.after(0, lambda: self._finish_update(dlg, new_exe, real))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _update_progress(self, lab, pb, got, total):
+    def _update_progress(self, lab, pb, got, total, prefix="下载中…"):
         if total:
             pb["mode"] = "determinate"
             pb["value"] = int(got * 100.0 / total)
-            lab["text"] = "下载中… %d%%  (%s / %s)" % (
-                int(got * 100.0 / total),
+            lab["text"] = "%s %d%%  (%s / %s)" % (
+                prefix, int(got * 100.0 / total),
                 updater.human_size(got), updater.human_size(total))
         else:
             pb["mode"] = "indeterminate"
-            pb.start(20)
-            lab["text"] = "下载中… %s" % updater.human_size(got)
+            if prefix != getattr(self, "_pb_prefix", None):
+                self._pb_prefix = prefix
+                pb.start(20)
+            lab["text"] = prefix
 
     def _update_error(self, dlg, msg):
         if dlg.winfo_exists():
@@ -1881,6 +1987,8 @@ class AppDialog(W.BaseDialog):
                           note=self.var_note.get().strip(),
                           args=self.var_args.get().strip(),
                           emoji=self.emoji_name, icon=self.icon_file)
+            if self.icon_file and self.icon_file != self.app.get("icon"):
+                fields["iconv"] = S.ICON_FORMAT
             if workdir or src_lnk:
                 fields["workdir"] = workdir or os.path.dirname(path)
                 fields["lnk"] = src_lnk

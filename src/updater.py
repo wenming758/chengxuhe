@@ -76,23 +76,57 @@ def probe_size(url):
     return 0
 
 
-def check_for_update(api_url, local_version):
+def _fetch_latest(api_url):
+    req = urllib.request.Request(api_url + "/releases/latest",
+                                 headers={"User-Agent": _UA,
+                                          "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, context=_ctx(), timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _pick_patch(assets, local_version):
+    """从发布资产里找「本地版本 -> 最新版本」的增量补丁。"""
+    local = parse_version(local_version)
+    best = None
+    for a in assets:
+        name = str(a.get("name", ""))
+        m = re.match(r"^patch_(.+?)_to_(.+?)\.(?:bin|patch)$", name, re.I)
+        if not m:
+            continue
+        if parse_version(m.group(1)) != local:
+            continue
+        size = a.get("size", 0) or 0
+        cand = {"url": a.get("browser_download_url", ""),
+                "size": size, "name": name,
+                "to": m.group(2)}
+        if best is None or (cand["size"] and cand["size"] < best["size"]):
+            best = cand
+    return best
+
+
+def check_for_update(apis, local_version):
     """返回 (available: bool, info: dict)。
 
-    info 字段：version（远程 tag）、name（exe 文件名）、size、url（下载直链）、
-    error（出错信息，空串表示正常）。
+    apis 可以是单个 API 地址或列表：依次尝试，第一个成功的为准。
+    info 字段：version、name、size、url、patch_url、patch_size、error。
+    发布里如果有匹配当前版本的增量补丁，patch_url 非空，客户端只下补丁。
     """
-    info = {"version": "", "name": "", "size": 0, "url": "", "error": ""}
-    try:
-        req = urllib.request.Request(api_url + "/releases/latest",
-                                     headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, context=_ctx(), timeout=30) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        info["error"] = "检查更新失败：服务器返回 %d" % e.code
-        return False, info
-    except Exception as e:
-        info["error"] = "检查更新失败：%s" % e
+    info = {"version": "", "name": "", "size": 0, "url": "",
+            "patch_url": "", "patch_size": 0, "error": ""}
+    if isinstance(apis, str):
+        apis = [apis]
+    data = None
+    errors = []
+    for api in apis or []:
+        try:
+            data = _fetch_latest(api)
+            break
+        except urllib.error.HTTPError as e:
+            errors.append("%d" % e.code)
+        except Exception as e:
+            errors.append(str(e))
+    if data is None:
+        info["error"] = "检查更新失败：%s" % ("；".join(errors) or "网络不可用")
         return False, info
 
     tag = (data.get("tag_name") or "").strip()
@@ -110,6 +144,11 @@ def check_for_update(api_url, local_version):
     if not info["size"] and info["url"]:
         info["size"] = probe_size(info["url"])
 
+    patch = _pick_patch(assets, local_version)
+    if patch and parse_version(patch.get("to")) == parse_version(tag):
+        info["patch_url"] = patch["url"]
+        info["patch_size"] = patch["size"]
+
     # 按版本号大小比对：远程更大才算有升级
     try:
         available = parse_version(tag) > parse_version(local_version)
@@ -118,14 +157,14 @@ def check_for_update(api_url, local_version):
     return available, info
 
 
-def download_exe(dl_url, dest_path, on_progress=None):
-    """下载 exe 到 dest_path（建议用 .new 临时名），返回本地路径。
+def download_file(dl_url, dest_path, on_progress=None):
+    """下载任意发布资产到 dest_path（.new/.patch 临时名）。
 
     on_progress(got, total) 在下载过程中回调，total 可能为 0（未知大小）。
     """
-    req = urllib.request.Request(dl_url,
-                                 headers={"User-Agent": _UA,
-                                          "Referer": "https://gitee.com/"})
+    req = urllib.request.Request(
+        dl_url, headers={"User-Agent": _UA,
+                         "Accept": "application/octet-stream"})
     with urllib.request.urlopen(req, context=_ctx(), timeout=300) as r:
         total = int(r.headers.get("Content-Length", "0") or 0)
         with open(dest_path, "wb") as f:
@@ -139,6 +178,9 @@ def download_exe(dl_url, dest_path, on_progress=None):
                 if on_progress:
                     on_progress(got, total)
     return dest_path
+
+
+download_exe = download_file
 
 
 def make_updater_bat(target_exe, new_exe):

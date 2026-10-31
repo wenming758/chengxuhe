@@ -6,6 +6,7 @@
 既能落盘到 icons/ 缓存目录，也能转成 base64 交给 Tk 显示。
 """
 import base64
+import math
 import struct
 import zlib
 
@@ -88,14 +89,16 @@ def resize_rgba(src, sw, sh, dw, dh):
         # ---- 双线性 ----
         for dy in range(dh):
             fy = (dy + 0.5) * sh / float(dh) - 0.5
-            y0 = int(fy)
+            # 必须用 floor：int() 向零截断，-0.04 会变成 0，
+            # 留下负的小数权重，插值结果能超过 255 让写 PNG 直接报错。
+            y0 = int(math.floor(fy))
             wy = fy - y0
             if y0 < 0:
                 y0, wy = 0, 0.0
             y1 = min(y0 + 1, sh - 1)
             for dx in range(dw):
                 fx = (dx + 0.5) * sw / float(dw) - 0.5
-                x0 = int(fx)
+                x0 = int(math.floor(fx))
                 wx = fx - x0
                 if x0 < 0:
                     x0, wx = 0, 0.0
@@ -110,7 +113,8 @@ def resize_rgba(src, sw, sh, dw, dh):
                          src[i01 + k] * wx * (1 - wy) +
                          src[i10 + k] * (1 - wx) * wy +
                          src[i11 + k] * wx * wy)
-                    out[o + k] = int(v + 0.5)
+                    iv = int(v + 0.5)
+                    out[o + k] = 255 if iv > 255 else (0 if iv < 0 else iv)
     return bytes(out)
 
 

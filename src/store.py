@@ -15,11 +15,19 @@ import pngutil
 
 APP_TITLE = "程序收纳盒"
 VERSION = "1.0.0"          # 内部版本号（勿随意改动）
-APP_VERSION = "v0.1.2"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
+APP_VERSION = "v0.1.3"     # 界面展示版本号（用户要求追加，不覆盖上面的 VERSION）
 AUTHOR = "wenming758"      # 软件作者
 
-# 在线升级（Gitee 仓库发布页，按版本号大小比对）
-UPDATE_API = "https://gitee.com/api/v5/repos/wenming760/chengxuhe"
+# 在线升级（优先 GitHub，仓库不可达时退回 Gitee 旧发布页）
+UPDATE_APIS = [
+    "https://api.github.com/repos/wenming758/chengxuhe",
+    "https://gitee.com/api/v5/repos/wenming760/chengxuhe",
+]
+UPDATE_API = UPDATE_APIS[0]
+
+# 图标缓存格式版本：低于它的条目启动时会在后台自动重抓一次
+# （v2：裁掉透明留白，修掉部分 exe 被缩成小米粒的问题）
+ICON_FORMAT = 2
 
 # 虚拟分类（不落盘，仅用于筛选）
 G_ALL = "__all__"
@@ -163,6 +171,7 @@ class Store(object):
             # 独立启动信息：工作目录 + 来源快捷方式（历史数据迁移用）
             it.setdefault("workdir", "")
             it.setdefault("lnk", "")
+            it.setdefault("iconv", 0)
         # 预填系统默认程序：只补「本机存在 + 尚未收藏过」的，不重复、不覆盖
         existing = set()
         for it in self.items:
@@ -289,6 +298,7 @@ class Store(object):
             "note": note,
             "group": group or (self.groups[0]["id"] if self.groups else "g_default"),
             "icon": icon_file or "",
+            "iconv": ICON_FORMAT,
             "emoji": emoji or "rocket",
             "pinned": False,
             "count": 0,

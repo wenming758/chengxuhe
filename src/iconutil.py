@@ -264,8 +264,10 @@ def _icon_private_extract(path, size):
     """PrivateExtractIconsW：直接从 exe 资源里按指定尺寸抠图标。"""
     phicon = (wt.HICON * 1)()
     piconid = (wt.UINT * 1)()
-    n = user32.PrivateExtractIconsW(ctypes.c_wchar_p(path), 0, size, size,
-                                    ctypes.byref(phicon), ctypes.byref(piconid), 1, 0)
+    n = user32.PrivateExtractIconsW(
+        ctypes.c_wchar_p(path), 0, size, size,
+        ctypes.cast(phicon, ctypes.POINTER(wt.HICON)),
+        ctypes.cast(piconid, ctypes.POINTER(wt.UINT)), 1, 0)
     if not n or not phicon[0]:
         return None
     try:
@@ -285,6 +287,50 @@ def _icon_shellinfo(path, large=True):
         return _hicon_to_rgba(info.hIcon)
     finally:
         user32.DestroyIcon(info.hIcon)
+
+
+def _trim_transparent(w, h, rgba, threshold=8, fill_ratio=0.9):
+    """
+    去掉四周的透明留白。
+
+    有些 exe（如绿色版 IDM）在系统 JUMBO 图像列表里返回的是一张 256x256
+    画布，真正的图标只画在左上角 48x48 区域，直接整张缩到 48px 就会变成
+    小米粒。这里按不透明像素的包围盒裁掉留白，裁完再统一缩放。
+    """
+    if not w or not h or not rgba:
+        return w, h, rgba
+    min_x, min_y, max_x, max_y = w, h, -1, -1
+    for y in range(h):
+        row = y * w * 4
+        for x in range(w):
+            if rgba[row + x * 4 + 3] > threshold:
+                if x < min_x:
+                    min_x = x
+                if x > max_x:
+                    max_x = x
+                if y < min_y:
+                    min_y = y
+                if y > max_y:
+                    max_y = y
+    if max_x < 0:
+        return None
+    bw = max_x - min_x + 1
+    bh = max_y - min_y + 1
+    if bw >= w * fill_ratio and bh >= h * fill_ratio:
+        return w, h, rgba
+    side = max(bw, bh)
+    if side > w or side > h:
+        return w, h, rgba
+    cx = (min_x + max_x) // 2
+    cy = (min_y + max_y) // 2
+    left = max(0, min(cx - side // 2, w - side))
+    top = max(0, min(cy - side // 2, h - side))
+    buf = bytearray(side * side * 4)
+    for y in range(side):
+        src = ((top + y) * w + left) * 4
+        dst = y * side * 4
+        buf[dst:dst + side * 4] = rgba[src:src + side * 4]
+    return side, side, bytes(buf)
 
 
 def extract_icon(path):
@@ -307,6 +353,8 @@ def extract_icon(path):
             got = fn()
         except Exception:
             got = None
+        if got:
+            got = _trim_transparent(*got)
         if got and got[0] > 0 and got[1] > 0:
             return got
     return None
