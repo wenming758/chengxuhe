@@ -328,30 +328,11 @@ class DragDrop(object):
     def has_pending(self):
         return bool(self.pending)
 
-    # -------------------------------------------------- 兜底：直接问系统要文件
-    def query_dropped_files(self):
-        """
-        窗口过程万一没被调到时（例如某些冻结/打包环境里
-        ctypes 回调被丢弃），直接调用 DragQueryFileW(hwnd) 兜底：
-        拖拽悬停时系统会把文件列表挂到窗口上，这里主动去取。
-        """
-        out = []
-        for hwnd in list(self._win.keys()) + [self.hwnd]:
-            if not hwnd:
-                continue
-            try:
-                got = self._read_files(hwnd)
-            except Exception:
-                got = []
-            for f in got:
-                if f not in out:
-                    out.append(f)
-            if got:
-                try:
-                    shell32.DragFinish(ctypes.c_void_p(int(hwnd)))
-                except Exception:
-                    pass
-        return out
+    # 这里原来有个「兜底」query_dropped_files：轮询时拿窗口句柄去调
+    # DragQueryFileW / DragFinish。窗口句柄不是 HDROP，这两个 API 会
+    # 把句柄当内存块解引用，返回垃圾条数后 DragFinish 再释放一个野指针，
+    # 结果是堆损坏、程序刚打开就闪退（0xc0000374）。WM_DROPFILES 之外
+    # 也根本拿不到真实的文件列表，所以兜底已删除。
 
     # -------------------------------------------------- 自检信息
     def info(self):

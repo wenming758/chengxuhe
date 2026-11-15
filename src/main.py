@@ -2016,14 +2016,8 @@ class Launcher(object):
         if getattr(self._dnd, "needs_repaint", False):
             self._dnd.needs_repaint = False
             self._reshow_repaint()
-        # 窗口过程没触发时，直接去系统取「拖拽进来的文件列表」兜底
-        try:
-            if not self._dnd.pending:
-                files = self._dnd.query_dropped_files()
-                if files:
-                    self._on_drop(files)
-        except Exception:
-            pass
+        # 只靠窗口过程收到的 WM_DROPFILES 拿文件：拿窗口句柄当 HDROP
+        # 去问系统会返回垃圾数据，并让 DragFinish 释放野指针导致闪退。
         # 顶层窗口（TkTopLevel）收到 WM_CLOSE —— 点任务栏关闭 / Alt+F4
         try:
             if self._dnd.closing and not self._closing:

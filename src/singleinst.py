@@ -219,7 +219,21 @@ class SingleInstance(object):
         self._tk_root = tk_root
         self._old_proc = None
         try:
-            win = ctypes.windll.user32
+            # 用独立的 user32 句柄：argtypes 是挂在函数对象上的，
+            # dnd.py 把共享的 user32.CallWindowProcW 首参声明成了 WNDPROC，
+            # 这里传原过程（c_void_p）会抛 ArgumentError；回调里抛异常
+            # 等于每个消息都返回 0，窗口的默认处理全被吞掉。
+            win = ctypes.WinDLL("user32", use_last_error=True)
+            win.CallWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                            wintypes.UINT, ctypes.c_size_t,
+                                            ctypes.c_ssize_t]
+            win.CallWindowProcW.restype = ctypes.c_ssize_t
+            win.DefWindowProcW.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                           ctypes.c_size_t, ctypes.c_ssize_t]
+            win.DefWindowProcW.restype = ctypes.c_ssize_t
+            win.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                              ctypes.c_void_p]
+            win.SetWindowLongPtrW.restype = ctypes.c_void_p
             hwnd = ctypes.c_void_p(int(tk_root.winfo_id()))
             GWLP_WNDPROC = -4
             WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p,
@@ -233,12 +247,12 @@ class SingleInstance(object):
                     except Exception:
                         self.activate()
                     return 0
-                return win.CallWindowProcW(self._old_proc, h, msg, wp, lp)
+                old = self._old_proc
+                if old:
+                    return win.CallWindowProcW(old, h, msg, wp, lp)
+                return win.DefWindowProcW(h, msg, wp, lp)
 
             self._proc = WNDPROC(myproc)
-            win.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int,
-                                              ctypes.c_void_p]
-            win.SetWindowLongPtrW.restype = ctypes.c_void_p
             self._old_proc = win.SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
                                                    ctypes.cast(self._proc,
                                                                ctypes.c_void_p))
